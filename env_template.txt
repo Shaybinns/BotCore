@@ -1,0 +1,35 @@
+# InvestCore API Configuration
+# Copy this file to .env and fill in your actual values
+
+# Flask Configuration
+FLASK_ENV=development
+FLASK_DEBUG=True
+SECRET_KEY=your-super-secret-key-change-this-in-production
+HOST=0.0.0.0
+PORT=5000
+
+# API Keys (Required)
+RAPIDAPI_KEY=your_rapidapi_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Database Configuration
+DATABASE_URL=sqlite:///investcore.db
+
+# CORS Configuration
+CORS_ORIGINS=*
+
+# Rate Limiting
+RATE_LIMIT=100 per minute
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FILE=investcore.log
+
+# Security
+JWT_SECRET_KEY=your-jwt-secret-key-change-this
+JWT_ACCESS_TOKEN_EXPIRES=3600
+
+# Optional: External Services
+# ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
+# FINNHUB_API_KEY=your_finnhub_key
+# POLYGON_API_KEY=your_polygon_key
