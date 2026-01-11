@@ -1,383 +1,468 @@
-from prompt import get_system_prompt
-from memory.short_term_cache import get_recent_conversation, add_to_recent_conversation
-from memory.command_stack import (
-    peek_stack, has_pending_steps,
-    build_command_stack_with_dependencies, execute_complete_stack,
-    resume_stack_execution
+"""
+BotCore Brain - AI Trading Decision Orchestrator
+
+This module orchestrates the full trading decision process:
+1. Receives OHLC data and context from MT5 EA via API
+2. Retrieves locked levels from database
+3. Fetches chart images when needed (chart-img.com)
+4. Gets market data context
+5. Calls GPT with vision for chart analysis
+6. Analyzes OHLC data for FVG/BOS/imbalances
+7. Makes trading decisions (WAIT/WATCH/ENTER/MANAGE/EXIT)
+8. Saves locked levels and setup states to database
+"""
+
+import os
+import json
+from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+from chart_service import get_chart_image
+from market_data import get_market_data
+from ohlc_analyzer import analyze_ohlc_data
+from gpt_vision import analyze_chart_with_gpt
+from database import (
+    get_locked_levels,
+    save_locked_levels,
+    get_active_setup,
+    save_setup_state,
+    save_trade_event
 )
-from command_engine import run_command
-from memory.long_term_db import save_result, get_user_facts
-from memory.knowledge_memory import get_vector_matches
 from llm_model import call_gpt
-from command_checker import extract_command_from_text
-from memory.data_collector import (
-    needs_more_input, receive_input, start_data_collection
-)
-from utils.storage_summariser import summarise_result
-from utils.output_summariser import summarise_output
+from prompt import get_trading_prompt
+
+load_dotenv()
 
 
-
-def handle_user_message(user_id: str, message: str) -> dict:
-    # STEP 1: Handle pending input collection
-    if needs_more_input(user_id):
-        filled = receive_input(user_id, message)
-
-        if filled:
-            # Check if we're in a command stack execution
-            
-            if has_pending_steps(user_id):
-                # Resume stack execution
-                execution_result = resume_stack_execution(user_id, run_command)
-                
-                if execution_result.get("needs_input"):
-                    # Still need more input
-                    missing_fields = execution_result.get("missing_fields", [])
-                    current_command = execution_result.get("current_command", "unknown")
-                    prompts = [f"Please provide: {field}" for field in missing_fields]
-                    combined_prompt = "\n".join(prompts)
-                    reply = f"Thanks! Now I need a few more things for {current_command}:\n{combined_prompt}"
-                else:
-                    # Stack execution complete
-                    main_result = execution_result.get("main_command_result")
-                    if main_result:
-                        output = summarise_output(filled["command"], message, main_result)
-                        reply = f"Thanks! I've got everything I need.\n\n{output}"
-                    else:
-                        reply = f"Thanks! I've got everything I need. Command executed successfully."
-            else:
-                # Regular single command execution
-                try:
-                    result = run_command(filled["command"], filled["args"])
-                    summary = summarise_result(filled["command"], result)
-                    save_result(user_id, summary)
-                    output = summarise_output(filled["command"], message, result)
-                    reply = f"Thanks! I've got everything I need.\n\n{output}"
-                except Exception as e:
-                    reply = f"[Error running command]: {str(e)}"
-        else:
-            reply = f"Got it. What's the next input I need?"
-
-        add_to_recent_conversation(user_id, f"User: {message}")
-        add_to_recent_conversation(user_id, f"Assistant: {reply}")
-        return {
-            "initial_response": reply,
-            "command_result": None,
-            "command_executed": False,
-            "status": "input_collection"
-        }
-
-    # STEP 2: Task reminder if stack exists
-    task_reminder = ""
-    if has_pending_steps(user_id):
-        current = peek_stack(user_id)
-        task_reminder = f"(You're currently in a multi-step task — next step is {current['command']}.)"
-
-    # STEP 3: Build full GPT context
-    system_prompt = get_system_prompt(user_id)
-    recent_chat = get_recent_conversation(user_id)
-    user_facts = get_user_facts(user_id)
-    vector_recall = get_vector_matches(message)
-
-    context = f"""
-[User Facts]
-{user_facts}
-
-[Relevant Knowledge]
-{vector_recall}
-
-[Conversation So Far]
-{recent_chat}
-
-User: {message}
-{task_reminder}
-"""
-    reply = call_gpt(system_prompt, context)
-
-    # STEP 4: Extract goal from reply
-    goal = None
-    for line in reply.splitlines():
-        if line.lower().startswith("goal:") or line.lower().startswith("task:"):
-            goal = line.split(":", 1)[1].strip()
-            break
-
-    # STEP 4: Command detection + execution logic
-    command_name, args = extract_command_from_text(reply)
-    if command_name:
-        # Send the initial AI response immediately
-        add_to_recent_conversation(user_id, f"User: {message}")
-        add_to_recent_conversation(user_id, f"Assistant: {reply}")
-        
-        try:
-            # Check for structured field metadata
-            try:
-                module = __import__(f"commands.{command_name}", fromlist=["get_required_fields"])
-                required_fields = module.get_required_fields()
-
-                if isinstance(required_fields, dict):
-                    missing_fields = [field for field in required_fields if field not in args]
-                else:
-                    missing_fields = [field for field in required_fields if field not in args]
-                    required_fields = {field: {"prompt": f"Please provide: {field}"} for field in required_fields}
-
-                if missing_fields:
-                    prompts = [
-                        f"{idx + 1}. {required_fields[field].get('prompt', f'Please provide: {field}')}"
-                        for idx, field in enumerate(missing_fields)
-                    ]
-                    combined_prompt = "\n".join(prompts)
-                    start_data_collection(user_id, command_name, args, missing_fields, required_fields)
-                    follow_up = f"\n\nTo run {command_name}, I need a few things:\n{combined_prompt}"
-                    add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-                    return {
-                        "initial_response": reply,
-                        "command_result": follow_up,
-                        "command_executed": False,
-                        "status": "needs_input",
-                        "command_name": command_name,
-                        "missing_fields": missing_fields
-                    }
-            except (ImportError, AttributeError):
-                pass
-
-            # Check if this command has dependencies that need to be built into a stack
-            from memory.command_stack import get_required_commands
-            required_commands = get_required_commands(command_name)
-            
-            if required_commands:
-                # Add user_id to args for command stack
-                args["user_id"] = user_id
-                # Build complete command stack with dependencies
-                build_command_stack_with_dependencies(user_id, command_name, args, goal=goal)
-                
-                # Execute the complete stack
-                execution_result = execute_complete_stack(user_id, run_command)
-                
-                # Check if we need user input
-                if execution_result.get("needs_input"):
-                    missing_fields = execution_result.get("missing_fields", [])
-                    current_command = execution_result.get("current_command", command_name)
-                    
-                    # Create prompts for missing fields
-                    prompts = [f"Please provide: {field}" for field in missing_fields]
-                    combined_prompt = "\n".join(prompts)
-                    
-                    follow_up = f"\n\nTo run {current_command}, I need a few things:\n{combined_prompt}"
-                    add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-                    
-                    return {
-                        "initial_response": reply,
-                        "command_result": follow_up,
-                        "command_executed": False,
-                        "status": "needs_input",
-                        "command_name": current_command,
-                        "missing_fields": missing_fields,
-                        "stack_executed": True
-                    }
-                
-                # Get the main command result (not the required commands)
-                main_result = execution_result["main_command_result"]
-                
-                if main_result:
-                    output = summarise_output(command_name, message, main_result)
-                    follow_up = f"[Task Complete]\n{output}"
-                else:
-                    follow_up = f"[Task Complete] Command executed successfully."
-                
-                add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-                return {
-                    "initial_response": reply,
-                    "command_result": follow_up,
-                    "command_executed": True,
-                    "status": "command_complete",
-                    "command_name": command_name,
-                    "goal": goal,
-                    "stack_executed": True
-                }
-            else:
-                # Simple command without dependencies - execute normally
-                result = run_command(command_name, args)
-                summary = summarise_result(command_name, result)
-                save_result(user_id, summary)
-                output = summarise_output(command_name, message, result)
-
-                follow_up = f"[Task Complete]\n{output}"
-                add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-                return {
-                    "initial_response": reply,
-                    "command_result": follow_up,
-                    "command_executed": True,
-                    "status": "command_complete",
-                    "command_name": command_name,
-                    "goal": goal
-                }
-
-        except Exception as e:
-            error_msg = f"Command execution failed: {str(e)}"
-            follow_up = f"[Error]: {error_msg}"
-            add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-            return {
-                "initial_response": reply,
-                "command_result": follow_up,
-                "command_executed": False,
-                "status": "error",
-                "error": str(e),
-                "command_name": command_name
-            }
-
-    # STEP 5: Regular response (no command)
-    add_to_recent_conversation(user_id, f"User: {message}")
-    add_to_recent_conversation(user_id, f"Assistant: {reply}")
-    return {
-        "initial_response": reply,
-        "command_result": None,
-        "command_executed": False,
-        "status": "conversation_only"
-    }
-
-def generate_ai_response_only(user_id: str, message: str) -> str:
-    """Generate only the AI's initial response without executing commands"""
-    # STEP 1: Handle pending input collection
-    if needs_more_input(user_id):
-        return "I need more information to proceed. What would you like me to do?"
+def process_trading_snapshot(
+    symbol: str,
+    ohlc_data: Dict[str, Any],
+    account_state: Dict[str, Any],
+    session_context: Optional[str] = None,
+    requested_timeframes: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Main entry point for trading decision processing.
     
-    # STEP 2: Task reminder if stack exists
-    task_reminder = ""
-    if has_pending_steps(user_id):
-        current = peek_stack(user_id)
-        task_reminder = f"(You're currently in a multi-step task — next step is {current['command']}.)"
+    Called by API server when MT5 EA requests analysis.
     
-    # STEP 3: Build full GPT context
-    system_prompt = get_system_prompt(user_id)
-    recent_chat = get_recent_conversation(user_id)
-    user_facts = get_user_facts(user_id)
-    vector_recall = get_vector_matches(message)
+    Args:
+        symbol: Trading symbol (e.g., "EURUSD")
+        ohlc_data: OHLC data from MT5 (multiple timeframes)
+        account_state: Account info from MT5 (balance, positions, etc.)
+        session_context: Optional session identifier (London/NY/etc.)
+        requested_timeframes: Optional list of timeframes that were requested
     
-    context = f"""
-[User Facts]
-{user_facts}
-
-[Relevant Knowledge]
-{vector_recall}
-
-[Conversation So Far]
-{recent_chat}
-
-You are replying directly to the user's message, which is - User: {message}
-{task_reminder}
-"""
-    reply = call_gpt(system_prompt, context)
-    
-    # STEP 4: Extract goal from reply
-    goal = None
-    for line in reply.splitlines():
-        if line.lower().startswith("goal:") or line.lower().startswith("task:"):
-            goal = line.split(":", 1)[1].strip()
-            break
-    
-    # STEP 5: Command detection (but don't execute)
-    command_name, args = extract_command_from_text(reply)
-    
-    if command_name:
-        # Add conversation to memory
-        add_to_recent_conversation(user_id, f"User: {message}")
-        add_to_recent_conversation(user_id, f"Assistant: {reply}")
-        
-        # Return the AI's response and detected command info
-        return reply, command_name, args, goal
-    else:
-        # No command, just conversation
-        add_to_recent_conversation(user_id, f"User: {message}")
-        add_to_recent_conversation(user_id, f"Assistant: {reply}")
-        return reply, None, None, None
-
-def execute_command_streaming(command_name: str, args: dict, user_id: str, message: str) -> dict:
-    """Execute a command and return results for streaming"""
+    Returns:
+        Trading decision JSON with action, levels, order_intent, next_requested_timeframes, etc.
+    """
     try:
-        # Add user_id to args for command stack
-        args["user_id"] = user_id
-        # Check for structured field metadata
-        try:
-            module = __import__(f"commands.{command_name}", fromlist=["get_required_fields"])
-            required_fields = module.get_required_fields()
-            
-            if isinstance(required_fields, dict):
-                missing_fields = [field for field in required_fields if field not in args]
-            else:
-                missing_fields = [field for field in required_fields if field not in args]
-                required_fields = {field: {"prompt": f"Please provide: {field}"} for field in required_fields}
-            
-            if missing_fields:
-                prompts = [
-                    f"{idx + 1}. {required_fields[field].get('prompt', f'Please provide: {field}')}"
-                    for idx, field in enumerate(missing_fields)
-                ]
-                combined_prompt = "\n".join(prompts)
-                start_data_collection(user_id, command_name, args, missing_fields, required_fields)
-                follow_up = f"\n\nTo run {command_name}, I need a few things:\n{combined_prompt}"
-                add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-                return {
-                    "command_result": follow_up,
-                    "command_executed": False,
-                    "status": "needs_input",
-                    "command_name": command_name,
-                    "missing_fields": missing_fields
-                }
-        except (ImportError, AttributeError):
-            pass
+        # Detect if this is a start-of-day request
+        is_start_of_day = _is_start_of_day_request(requested_timeframes, ohlc_data)
         
-        # Check if this command has dependencies that need to be built into a stack
-        from memory.command_stack import get_required_commands
-        required_commands = get_required_commands(command_name)
+        if is_start_of_day:
+            print(f"[Brain] ===== START OF DAY REQUEST FOR {symbol} =====")
+            print(f"[Brain] Timeframes received: {list(ohlc_data.keys())}")
         
-        if required_commands:
-            # Build complete command stack with dependencies
-            build_command_stack_with_dependencies(user_id, command_name, args, goal=None)
-            
-            # Execute the complete stack
-            execution_result = execute_complete_stack(user_id, run_command)
-            
-            # Get the main command result (not the required commands)
-            main_result = execution_result["main_command_result"]
-            
-            if main_result:
-                output = summarise_output(command_name, message, main_result)
-                follow_up = f"[Task Complete]\n{output}"
+        # Step 1: Get locked levels from database
+        locked_levels = get_locked_levels(symbol, session_context)
+        print(f"[Brain] Retrieved {len(locked_levels)} locked levels from database")
+        
+        # Step 2: Get market data context (always fetch for context)
+        print(f"[Brain] Fetching market data for {symbol}...")
+        market_context = get_market_data(symbol)
+        print(f"[Brain] Market data retrieved: {len(market_context)} fields")
+        
+        # Step 3: Analyze OHLC data for patterns
+        print(f"[Brain] Analyzing OHLC data for patterns...")
+        ohlc_analysis = analyze_ohlc_data(ohlc_data, locked_levels)
+        print(f"[Brain] OHLC analysis complete: {len(ohlc_analysis.get('fvgs', []))} FVGs, {len(ohlc_analysis.get('bos_signals', []))} BOS signals")
+        
+        # Step 4: Fetch chart image(s)
+        # For start-of-day, always fetch chart images for context building
+        # For other requests, fetch if needed
+        chart_images = _fetch_chart_images(
+            symbol=symbol,
+            ohlc_data=ohlc_data,
+            is_start_of_day=is_start_of_day,
+            locked_levels=locked_levels,
+            account_state=account_state,
+            session_context=session_context
+        )
+        
+        # Step 5: Build context for AI
+        print(f"[Brain] Building AI context...")
+        ai_context = _build_ai_context(
+            symbol=symbol,
+            ohlc_data=ohlc_data,
+            ohlc_analysis=ohlc_analysis,
+            locked_levels=locked_levels,
+            account_state=account_state,
+            market_context=market_context,
+            chart_images=chart_images,
+            session_context=session_context,
+            is_start_of_day=is_start_of_day
+        )
+        
+        # Step 6: Call GPT for trading decision
+        print(f"[Brain] Calling GPT for trading decision...")
+        if chart_images:
+            # Use vision model for chart analysis
+            # If multiple images, use the primary one (H1 or first available)
+            primary_chart = chart_images.get("H1") or chart_images.get("H4") or (list(chart_images.values())[0] if chart_images else None)
+            if primary_chart:
+                print(f"[Brain] Using GPT Vision with chart image: {primary_chart[:50]}...")
+                trading_decision = analyze_chart_with_gpt(ai_context, primary_chart)
             else:
-                follow_up = f"[Task Complete] Command executed successfully."
-            
-            add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-            return {
-                "command_result": follow_up,
-                "command_executed": True,
-                "status": "command_complete",
-                "command_name": command_name,
-                "stack_executed": True
-            }
+                print(f"[Brain] Chart images available but no valid URL, using text-only")
+                trading_decision = _call_gpt_text_only(ai_context)
         else:
-            # Simple command without dependencies - execute normally
-            result = run_command(command_name, args)
-            summary = summarise_result(command_name, result)
-            save_result(user_id, summary)
-            output = summarise_output(command_name, message, result)
-            
-            follow_up = f"[Task Complete]\n{output}"
-            add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
-            return {
-                "command_result": follow_up,
-                "command_executed": True,
-                "status": "command_complete",
-                "command_name": command_name
-            }
+            # Use text-only model
+            print(f"[Brain] No chart images, using text-only GPT")
+            trading_decision = _call_gpt_text_only(ai_context)
+        
+        print(f"[Brain] GPT decision received: action={trading_decision.get('action', 'UNKNOWN')}")
+        
+        # Step 8: Validate and process decision
+        validated_decision = _validate_decision(trading_decision, account_state)
+        
+        # Step 9: Save state to database
+        if validated_decision.get("levels_update"):
+            save_locked_levels(
+                symbol=symbol,
+                levels=validated_decision["levels_update"],
+                session=session_context
+            )
+        
+        if validated_decision.get("setup_id"):
+            save_setup_state(
+                symbol=symbol,
+                setup_id=validated_decision["setup_id"],
+                state=validated_decision.get("state_update", {}),
+                session=session_context
+            )
+        
+        # Step 10: Determine next requested timeframes
+        next_timeframes = _determine_next_timeframes(
+            validated_decision,
+            is_start_of_day,
+            ohlc_data
+        )
+        validated_decision["next_requested_timeframes"] = next_timeframes
+        
+        # Step 11: Return clean JSON for EA
+        return _format_ea_response(validated_decision)
         
     except Exception as e:
-        error_msg = f"Command execution failed: {str(e)}"
-        follow_up = f"[Error]: {error_msg}"
-        add_to_recent_conversation(user_id, f"Assistant: {follow_up}")
         return {
-            "command_result": follow_up,
-            "command_executed": False,
-            "status": "error",
+            "action": "ERROR",
             "error": str(e),
-            "command_name": command_name
+            "next_run_at_utc": _get_next_check_time(60)  # Retry in 1 minute
         }
+
+
+def _fetch_chart_images(
+    symbol: str,
+    ohlc_data: Dict[str, Any],
+    is_start_of_day: bool,
+    locked_levels: List[Dict[str, Any]],
+    account_state: Dict[str, Any],
+    session_context: Optional[str]
+) -> Dict[str, Optional[str]]:
+    """
+    Fetch chart images based on context.
+    
+    For start-of-day: Always fetch H1 and H4 charts for context building
+    For other requests: Fetch if needed (no levels, hot zone, active setup)
+    
+    Returns:
+        Dictionary mapping timeframe to chart image URL (e.g., {"H1": "url", "H4": "url"})
+    """
+    chart_images = {}
+    
+    if is_start_of_day:
+        # Start of day: Always fetch H1 and H4 for context building
+        print(f"[Start of Day] Fetching chart images for {symbol}...")
+        
+        h1_chart = get_chart_image(
+            symbol=symbol,
+            timeframe="H1",
+            session=session_context
+        )
+        if h1_chart:
+            chart_images["H1"] = h1_chart
+            print(f"[Start of Day] H1 chart fetched successfully")
+        
+        h4_chart = get_chart_image(
+            symbol=symbol,
+            timeframe="H4",
+            session=session_context
+        )
+        if h4_chart:
+            chart_images["H4"] = h4_chart
+            print(f"[Start of Day] H4 chart fetched successfully")
+        
+        return chart_images
+    
+    # For non-start-of-day requests, check if chart is needed
+    needs_chart = False
+    
+    # No levels = need initial chart
+    if not locked_levels:
+        needs_chart = True
+    
+    # Check if price is near any locked level (hot zone)
+    current_price = ohlc_data.get("current_price")
+    if current_price and not needs_chart:
+        for level in locked_levels:
+            level_price = level.get("price")
+            if level_price:
+                distance_pips = abs(current_price - level_price) * 10000  # Rough pips
+                if distance_pips < 50:  # Within 50 pips
+                    needs_chart = True
+                    break
+    
+    # Check for active setup
+    if not needs_chart:
+        active_positions = account_state.get("open_positions", [])
+        if active_positions:
+            needs_chart = True
+    
+    if needs_chart:
+        # Fetch primary timeframe chart
+        primary_tf = ohlc_data.get("primary_timeframe", "H1")
+        chart_url = get_chart_image(
+            symbol=symbol,
+            timeframe=primary_tf,
+            session=session_context
+        )
+        if chart_url:
+            chart_images[primary_tf] = chart_url
+    
+    return chart_images
+
+
+def _is_start_of_day_request(
+    requested_timeframes: Optional[List[str]],
+    ohlc_data: Dict[str, Any]
+) -> bool:
+    """
+    Detect if this is a start-of-day request.
+    
+    Start of day is indicated by:
+    - Requested timeframes are H1, H4, D1, W1 (in any order)
+    - OR no locked levels exist (first run)
+    """
+    if not requested_timeframes:
+        # Check if we have the start-of-day timeframes in ohlc_data
+        has_h1 = "H1" in ohlc_data
+        has_h4 = "H4" in ohlc_data
+        has_d1 = "D1" in ohlc_data
+        has_w1 = "W1" in ohlc_data
+        
+        if has_h1 and has_h4 and has_d1 and has_w1:
+            return True
+    
+    if requested_timeframes:
+        # Check if all start-of-day timeframes are present
+        start_of_day_tfs = {"H1", "H4", "D1", "W1"}
+        requested_set = set(requested_timeframes)
+        
+        if start_of_day_tfs.issubset(requested_set):
+            return True
+    
+    return False
+
+
+def _build_ai_context(
+    symbol: str,
+    ohlc_data: Dict[str, Any],
+    ohlc_analysis: Dict[str, Any],
+    locked_levels: List[Dict[str, Any]],
+    account_state: Dict[str, Any],
+    market_context: Dict[str, Any],
+    chart_images: Dict[str, Optional[str]],
+    session_context: Optional[str],
+    is_start_of_day: bool = False
+) -> str:
+    """Build comprehensive context string for AI."""
+    
+    context_parts = [
+        f"=== TRADING CONTEXT ===",
+        f"Symbol: {symbol}",
+        f"Session: {session_context or 'N/A'}",
+        f"Current Time (UTC): {datetime.now(timezone.utc).isoformat()}",
+        f"Start of Day: {is_start_of_day}",
+        "",
+        "=== ACCOUNT STATE ===",
+        json.dumps(account_state, indent=2),
+        "",
+        "=== OHLC DATA ===",
+        json.dumps(ohlc_data, indent=2),
+        "",
+        "=== OHLC ANALYSIS ===",
+        json.dumps(ohlc_analysis, indent=2),
+        "",
+        "=== LOCKED LEVELS ===",
+        json.dumps(locked_levels, indent=2),
+        "",
+        "=== MARKET CONTEXT ===",
+        json.dumps(market_context, indent=2),
+    ]
+    
+    # Add chart image information
+    if chart_images:
+        context_parts.extend([
+            "",
+            "=== CHART IMAGES ==="
+        ])
+        
+        for timeframe, chart_url in chart_images.items():
+            if chart_url:
+                context_parts.append(f"{timeframe} Chart URL: {chart_url}")
+        
+        if is_start_of_day:
+            context_parts.append("")
+            context_parts.append("START OF DAY ANALYSIS:")
+            context_parts.append("- Analyze the H1 and H4 chart images to identify obvious swing highs/lows")
+            context_parts.append("- Look for clustering zones (multiple touches)")
+            context_parts.append("- Map visual levels to exact OHLC prices from the data")
+            context_parts.append("- Lock these levels for the session/day")
+            context_parts.append("- Establish market bias and key narrative")
+        else:
+            context_parts.append("")
+            context_parts.append("Analyze the chart image(s) for visual structure, obvious highs/lows, and market sentiment.")
+    
+    return "\n".join(context_parts)
+
+
+def _call_gpt_text_only(context: str) -> Dict[str, Any]:
+    """Call GPT with text-only context (no vision)."""
+    system_prompt = get_trading_prompt()
+    
+    response = call_gpt(system_prompt, context)
+    
+    # Parse JSON response
+    try:
+        # Extract JSON from response if wrapped in markdown
+        if "```json" in response:
+            json_start = response.find("```json") + 7
+            json_end = response.find("```", json_start)
+            response = response[json_start:json_end].strip()
+        elif "```" in response:
+            json_start = response.find("```") + 3
+            json_end = response.find("```", json_start)
+            response = response[json_start:json_end].strip()
+        
+        return json.loads(response)
+    except json.JSONDecodeError:
+        # Fallback: try to extract JSON object
+        import re
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        raise ValueError(f"Could not parse JSON from GPT response: {response}")
+
+
+def _validate_decision(
+    decision: Dict[str, Any],
+    account_state: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Validate AI decision and ensure it's safe."""
+    
+    # Ensure required fields
+    if "action" not in decision:
+        decision["action"] = "WAIT"
+    
+    if "next_run_at_utc" not in decision:
+        decision["next_run_at_utc"] = _get_next_check_time(15)
+    
+    # Validate action types
+    valid_actions = ["WAIT", "WATCH", "ENTER", "MANAGE", "EXIT", "STAND_DOWN", "ERROR"]
+    if decision["action"] not in valid_actions:
+        decision["action"] = "WAIT"
+    
+    # Validate order_intent if present
+    if decision.get("order_intent"):
+        order = decision["order_intent"]
+        required_fields = ["type", "price", "stop_loss", "take_profit", "risk_pct"]
+        for field in required_fields:
+            if field not in order:
+                decision["action"] = "WAIT"
+                decision["order_intent"] = None
+                break
+    
+    # Check account constraints
+    if decision["action"] == "ENTER":
+        open_positions = account_state.get("open_positions", [])
+        max_trades = account_state.get("max_trades_per_day", 10)
+        if len(open_positions) >= max_trades:
+            decision["action"] = "WAIT"
+            decision["reason_codes"] = decision.get("reason_codes", []) + ["MAX_TRADES_REACHED"]
+            decision["order_intent"] = None
+    
+    return decision
+
+
+def _determine_next_timeframes(
+    decision: Dict[str, Any],
+    is_start_of_day: bool,
+    ohlc_data: Dict[str, Any]
+) -> List[str]:
+    """
+    Determine which timeframes to request next based on AI decision.
+    
+    The AI can specify next_requested_timeframes in its response,
+    or we can infer based on the action and context.
+    """
+    # Check if AI explicitly requested timeframes
+    if "next_requested_timeframes" in decision:
+        return decision["next_requested_timeframes"]
+    
+    # Infer based on action
+    action = decision.get("action", "WAIT")
+    
+    if action == "WAIT":
+        # Low activity - check H1 and M15 periodically
+        return ["H1", "M15"]
+    
+    elif action == "WATCH":
+        # Monitoring - need M15 and M5
+        return ["M15", "M5"]
+    
+    elif action == "ENTER" or action == "HOT_ZONE":
+        # Hot zone - need M5 and M1 for precision
+        return ["M5", "M1"]
+    
+    elif action == "MANAGE" or action == "IN_TRADE":
+        # Managing position - M1 for tight monitoring
+        return ["M1", "M5"]
+    
+    else:
+        # Default: H1 and M15
+        return ["H1", "M15"]
+
+
+def _format_ea_response(decision: Dict[str, Any]) -> Dict[str, Any]:
+    """Format response for MT5 EA consumption."""
+    
+    return {
+        "action": decision.get("action", "WAIT"),
+        "next_run_at_utc": decision.get("next_run_at_utc"),
+        "setup_id": decision.get("setup_id"),
+        "levels_update": decision.get("levels_update"),
+        "order_intent": decision.get("order_intent"),
+        "reason_codes": decision.get("reason_codes", []),
+        "state_update": decision.get("state_update", {}),
+        "next_requested_timeframes": decision.get("next_requested_timeframes", []),
+        "error": decision.get("error")
+    }
+
+
+def _get_next_check_time(minutes: int) -> str:
+    """Get next check time in UTC ISO format."""
+    next_time = datetime.now(timezone.utc)
+    from datetime import timedelta
+    next_time += timedelta(minutes=minutes)
+    return next_time.isoformat()

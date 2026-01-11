@@ -1,293 +1,97 @@
-# 🚀 InvestCore AI
+# BotCore - AI-Led Discretionary Trading System
 
-**Intelligent Investment Analysis & Portfolio Management Powered by AI**
+**Intelligent Trading System with MT5 EA Execution**
 
-InvestCore AI is a sophisticated financial analysis platform that combines natural language processing with real-time market data to provide comprehensive investment insights, portfolio analysis, and market assessments.
+BotCore is a trading system where AI performs full discretionary analysis using both chart screenshots (visual perception) and OHLC data (precise detection), while MetaTrader 5 executes trades with hard safety limits.
 
-## ✨ What It Does
+## Architecture
 
-### 🤖 **AI-Powered Investment Analysis**
-InvestCore transforms how you analyze investments by letting you ask questions in plain English. Instead of learning complex financial software, you can simply ask:
+### Core Components
 
-- *"Should I invest in Apple stock?"*
-- *"What are the best tech stocks under $100?"*
-- *"How is the healthcare sector performing?"*
-- *"Create a portfolio for me with 60% stocks and 40% bonds"*
+1. **Python Server** (`api_server.py`) - REST API for MT5 EA communication
+2. **Brain** (`brain.py`) - AI decision orchestrator
+3. **Chart Service** (`chart_service.py`) - Chart-IMG.com integration
+4. **OHLC Analyzer** (`ohlc_analyzer.py`) - FVG/BOS/imbalance detection
+5. **GPT Vision** (`gpt_vision.py`) - Chart image analysis
+6. **Market Data** (`market_data.py`) - Market context service
+7. **Database** (`database.py`) - PostgreSQL for locked levels and setups
+8. **MT5 EA** (`mt5_ea.mq5`) - Trade execution with safety limits
 
-The AI automatically understands your intent and runs the appropriate financial analysis commands to give you comprehensive insights.
+## Setup
 
-### 📊 **Comprehensive Financial Intelligence**
-The platform aggregates data from multiple sources to give you a complete picture:
+### 1. Environment Variables
 
-- **Real-time Market Data** - Live prices, volume, market cap, and trading metrics
-- **Financial Statements** - Balance sheets, income statements, cash flow analysis
-- **Earnings Analysis** - Quarterly reports, earnings surprises, growth trends
-- **Economic Indicators** - GDP, inflation, interest rates, and market sentiment
-- **Sector Performance** - Industry comparisons and sector rotation analysis
+Copy `env_template.txt` to `.env` and configure:
 
-### 🎯 **Smart Portfolio Management**
-InvestCore doesn't just show you data—it helps you make decisions:
-
-- **Asset Screening** - Filter stocks based on your criteria (P/E ratios, market cap, growth rates)
-- **Risk Assessment** - Analyze volatility, beta, and correlation with your existing portfolio
-- **Opportunity Identification** - Find undervalued stocks and emerging trends
-- **Portfolio Optimization** - Get data-driven recommendations for asset allocation
-
-## 🏗️ How It Works
-
-### **1. Natural Language Processing**
-When you ask a question, InvestCore's AI brain analyzes your intent:
-- *"Analyze AAPL"* → Identifies you want asset analysis
-- *"Show me growth stocks"* → Recognizes you want asset screening
-- *"How's the market today?"* → Understands you want market assessment
-
-### **2. Command Selection & Execution**
-The AI automatically selects and runs the right financial analysis commands:
-- **Asset Analysis** → Fetches real-time data, financials, and performance metrics
-- **Portfolio Screening** → Applies filters and returns matching stocks
-- **Market Assessment** → Analyzes overall market conditions and sentiment
-- **Sector Analysis** → Compares industry performance and trends
-
-### **3. Intelligent Response Generation**
-Instead of raw data, you get actionable insights:
-- **Clear explanations** of what the data means
-- **Context and trends** to understand the bigger picture
-- **Actionable recommendations** based on your query
-- **Follow-up suggestions** for deeper analysis
-
-## 🌐 Core Components
-
-### **🧠 Brain Module (`brain.py`)**
-The central intelligence that:
-- Processes your natural language queries
-- Selects appropriate analysis commands
-- Orchestrates data collection and analysis
-- Generates human-readable responses
-
-### **🎮 Command Engine (`command_engine.py`)**
-Manages the execution of financial analysis commands:
-- **Asset Information** - Real-time stock data and metrics
-- **Financial Analysis** - Balance sheets, earnings, ratios
-- **Market Assessment** - Overall market conditions
-- **Portfolio Tools** - Screening, optimization, risk analysis
-
-### **📱 Web Interface (`test_dashboard.py`)**
-A modern chatbot interface that:
-- Accepts natural language questions
-- Displays responses in a conversational format
-- Shows both initial analysis and detailed results
-- Provides a user-friendly way to interact with the AI
-
-### **🌐 API Server (`api_server.py`)**
-A full-featured REST API that:
-- Handles all investment analysis requests
-- Provides structured data for app integration
-- Supports streaming responses for real-time updates
-- Includes comprehensive error handling and validation
-
-## 💬 How to Use It
-
-### **Simple Questions, Smart Answers**
-Just ask what you want to know:
-
-```
-You: "What's happening with Tesla stock?"
-InvestCore: "Let me analyze Tesla (TSLA) for you. I'll check the current market data, recent performance, and key financial metrics..."
-
-[AI fetches real-time data and financials]
-
-InvestCore: "Tesla is currently trading at $X with a market cap of $Y. The stock has [performance summary]. Key metrics include [P/E, growth rates, etc.]. Based on recent earnings and market trends, [analysis and insights]."
+```bash
+OPENAI_API_KEY=your_key_here
+CHART_IMG_API_KEY=your_key_here
+DATABASE_URL=postgresql://user:pass@localhost:5432/botcore
 ```
 
-### **Portfolio Analysis Made Simple**
-Get comprehensive portfolio insights:
+### 2. Database Initialization
 
-```
-You: "Create a diversified portfolio for me"
-InvestCore: "I'll help you build a well-balanced portfolio. Let me analyze current market conditions and identify suitable assets across different sectors and risk levels..."
-
-[AI screens assets and analyzes correlations]
-
-InvestCore: "Here's a diversified portfolio recommendation: [asset allocation breakdown] with [risk assessment]. This portfolio aims to [investment goals] while managing risk through [diversification strategy]."
+```python
+from database import init_database
+init_database()
 ```
 
-### **Market Intelligence on Demand**
-Stay informed about market conditions:
+### 3. Install Dependencies
 
-```
-You: "How is the tech sector performing today?"
-InvestCore: "Let me check the current performance of the technology sector and compare it to other sectors..."
-
-[AI analyzes sector performance and market data]
-
-InvestCore: "The tech sector is currently [performance summary] with [key trends]. Notable movers include [top performers/decliners]. This compares to [market context] and suggests [market insights]."
+```bash
+pip install -r requirements.txt
 ```
 
-## 🔍 What Makes It Special
+### 4. Run Server
 
-### **🤖 True AI Understanding**
-Unlike traditional financial tools that require specific commands, InvestCore understands context and intent:
-- **Follow-up questions** work naturally
-- **Complex requests** are broken down automatically
-- **Missing information** is requested intelligently
+```bash
+python api_server.py
+```
 
-### **📊 Real-Time Intelligence**
-Get current market insights, not just historical data:
-- **Live market data** from multiple sources
-- **Real-time analysis** of current conditions
-- **Dynamic recommendations** based on market changes
+### 5. Install MT5 EA
 
-### **🎯 Actionable Insights**
-Every response includes:
-- **What the data means** in plain English
-- **Why it matters** for your investment decisions
-- **What to consider** for your next steps
-- **Related analysis** that might be helpful
+1. Copy `mt5_ea.mq5` to MetaTrader 5 `Experts` folder
+2. Configure EA inputs (ServerURL, risk limits, etc.)
+3. Attach to chart and enable auto-trading
 
-### **🌐 Flexible Integration**
-Use InvestCore however you prefer:
-- **Web dashboard** for interactive analysis
-- **API endpoints** for app integration
-- **Command line** for automation
-- **Mobile apps** through the REST API
+## Trading Flow
 
-## 🚀 Use Cases
+1. **Session Start**: AI identifies levels from chart, locks them in DB
+2. **Monitoring**: AI checks OHLC for patterns, uses locked levels
+3. **Hot Zone**: When price approaches locked level, AI monitors closely
+4. **Entry**: AI detects FVG/BOS/imbalance, confirms with chart if needed
+5. **Execution**: MT5 EA validates and executes if safe
+6. **Management**: AI manages position, exits on TP/SL/invalidation
 
-### **Individual Investors**
-- **Stock Research** - Get comprehensive analysis of any stock
-- **Portfolio Review** - Analyze your current holdings and performance
-- **Market Timing** - Understand current market conditions and trends
-- **Risk Management** - Assess portfolio risk and diversification
+## Key Features
 
-### **Financial Advisors**
-- **Client Presentations** - Generate professional investment analysis
-- **Portfolio Reviews** - Comprehensive client portfolio assessment
-- **Market Updates** - Regular market condition reports
-- **Investment Research** - Deep dive into specific assets or sectors
+- **Dual Input Strategy**: Chart images (visual) + OHLC data (precise)
+- **Locked Levels**: Levels persist in DB, don't redraw every run
+- **Stateful System**: Tracks setups, phases, and trade history
+- **Safety First**: EA enforces hard limits (max trades, risk, drawdown)
+- **Flexible Monitoring**: Adjusts check frequency based on market state
 
-### **Traders**
-- **Real-time Analysis** - Quick market condition assessment
-- **Sector Rotation** - Identify trending sectors and opportunities
-- **Risk Assessment** - Analyze volatility and market sentiment
-- **Portfolio Screening** - Find stocks matching specific criteria
+## API Endpoints
 
-### **Researchers & Analysts**
-- **Market Research** - Comprehensive market condition analysis
-- **Sector Analysis** - Industry performance and trend analysis
-- **Financial Modeling** - Access to financial data and ratios
-- **Economic Analysis** - Macroeconomic indicators and trends
+- `POST /api/trading/snapshot` - MT5 EA requests analysis
+- `POST /api/trading/execute` - MT5 EA confirms execution
+- `GET /api/trading/status` - System status check
+- `GET /api/health` - Health check
 
-## 🔧 Technical Architecture
+## Database Schema
 
-### **Modular Design**
-InvestCore is built with a modular architecture that makes it easy to:
-- **Add new analysis commands** without changing core logic
-- **Integrate new data sources** through standardized interfaces
-- **Customize AI responses** for different use cases
-- **Scale performance** by optimizing individual components
+- `locked_levels` - Persistent levels/zones per symbol/session
+- `active_setups` - Current setup states and phases
+- `trade_events` - Execution history and events
 
-### **AI-Powered Decision Making**
-The system uses advanced AI to:
-- **Understand natural language** queries and context
-- **Select optimal commands** for each analysis request
-- **Generate human-readable** explanations of complex data
-- **Provide intelligent follow-up** suggestions
+## Strategy
 
-### **Real-Time Data Integration**
-Connect to multiple financial data sources:
-- **Market Data APIs** for real-time pricing and volume
-- **Financial Statement APIs** for company fundamentals
-- **Economic Data APIs** for macroeconomic indicators
-- **News APIs** for market sentiment and events
+The AI uses a prompt-based strategy defined in `prompt.py`:
+- Level identification from charts
+- FVG/BOS/imbalance detection from OHLC
+- Entry/exit criteria
+- Risk management rules
 
-## 📊 Performance & Reliability
+## License
 
-### **Fast Response Times**
-- **Simple queries**: Under 2 seconds
-- **Data analysis**: 3-5 seconds
-- **Complex portfolio analysis**: 5-10 seconds
-
-### **Scalable Architecture**
-- **Concurrent users**: 100+ simultaneous connections
-- **API rate limits**: Respects external service limits
-- **Memory optimization**: Efficient resource usage
-- **Error handling**: Graceful degradation and recovery
-
-### **Data Quality**
-- **Multiple sources** for verification and completeness
-- **Real-time updates** for current market conditions
-- **Historical data** for trend analysis and context
-- **Quality checks** to ensure data accuracy
-
-## 🔒 Security & Privacy
-
-### **Data Protection**
-- **No permanent storage** of user queries or data
-- **Encrypted API keys** and sensitive information
-- **Secure communication** protocols
-- **Access controls** and rate limiting
-
-### **API Security**
-- **Input validation** on all endpoints
-- **CORS protection** for web integration
-- **Rate limiting** to prevent abuse
-- **Error handling** that doesn't expose sensitive information
-
-## 🤝 Contributing
-
-InvestCore is built for the investment community, and we welcome contributions:
-
-### **How to Contribute**
-1. **Fork the repository**
-2. **Create a feature branch** for your improvements
-3. **Implement your changes** following the coding standards
-4. **Test thoroughly** to ensure quality
-5. **Submit a pull request** with clear documentation
-
-### **Areas for Contribution**
-- **New Analysis Commands** - Add specialized financial analysis tools
-- **Data Source Integration** - Connect to additional financial data providers
-- **AI Model Improvements** - Enhance natural language understanding
-- **Performance Optimization** - Improve response times and efficiency
-- **Documentation** - Help others understand and use the platform
-
-### **Development Standards**
-- **Python best practices** and PEP 8 style guidelines
-- **Comprehensive testing** for all new features
-- **Clear documentation** for code and APIs
-- **Performance consideration** for all changes
-
-## 📝 License
-
-This project is licensed under the MIT License, making it free for both personal and commercial use.
-
-## 🙏 Acknowledgments
-
-InvestCore builds on the work of many amazing projects and services:
-
-- **OpenAI** for providing the GPT models that power our AI intelligence
-- **RapidAPI** for connecting us to comprehensive financial data sources
-- **Flask** for the robust web framework that powers our API
-- **The open-source community** for the tools and libraries that make this possible
-
-## 📞 Support & Community
-
-### **Getting Help**
-- **GitHub Issues** - Report bugs or request features
-- **GitHub Discussions** - Ask questions and share ideas
-- **Documentation** - Comprehensive guides and examples
-- **Examples** - Sample queries and use cases
-
-### **Community**
-- **Share your use cases** and how you're using InvestCore
-- **Contribute improvements** to help others
-- **Report issues** to make the platform better
-- **Suggest features** for future development
-
----
-
-**Built with ❤️ for the investment community**
-
-*InvestCore AI - Making sophisticated investment analysis accessible to everyone through the power of artificial intelligence*
-
-*Whether you're a seasoned investor or just starting out, InvestCore helps you make informed decisions with AI-powered insights and real-time market intelligence.*
+MIT License
