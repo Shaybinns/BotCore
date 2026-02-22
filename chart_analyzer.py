@@ -26,9 +26,20 @@ load_dotenv()
 
 CHART_IMG_API_KEY = os.getenv("CHART_IMG_API_KEY")
 CHART_IMG_BASE_URL = "https://api.chart-img.com/v1/tradingview/advanced-chart"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Lazy-initialised — avoids crashing the server at import time if the key
+# is not yet set in the environment (e.g. during Railway container startup).
+_openai_client: OpenAI | None = None
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 
 # =============================================================================
@@ -315,8 +326,8 @@ def analyze_charts_with_gpt_vision(
     Raises:
         ValueError if OPENAI_API_KEY is missing or all chart fetches fail.
     """
-    if not client:
-        raise ValueError("OPENAI_API_KEY not set -- cannot run analysis")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise ValueError("OPENAI_API_KEY not set — cannot run chart analysis")
 
     formatted_symbol = format_symbol_for_chart(symbol, asset_type)
     print(f"\n[analysis] Starting visual chart analysis: {formatted_symbol} {', '.join(timeframes)}")
@@ -371,7 +382,7 @@ def analyze_charts_with_gpt_vision(
 
     # --- call OpenAI Vision ---
     try:
-        response = client.chat.completions.create(
+        response = _get_openai_client().chat.completions.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=3000,
