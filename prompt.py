@@ -249,7 +249,7 @@ You MUST respond with valid JSON only, no prose. Format:
       "entry_price": 1.0850 | null,
       "stop_loss": 1.0800 | null,
       "take_profit": 1.0900 | null,
-      "risk_percentage": 0.01 | null
+      "risk_percentage": 1 | 2 | null
     },
     "manage_order": {
       "new_stop_loss": 1.0820 | null,

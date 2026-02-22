@@ -3,10 +3,13 @@ Chart Analyzer
 
 Handles everything chart-related:
   1. Fetch chart images from chart-img.com (returns PNG bytes → convert to base64)
-  2. Send charts + context to GPT Vision for analysis
-  3. Parse JSON response back to brain.py
+  2. Send charts to GPT Vision for pure visual analysis (no text context)
+  3. Return per-timeframe visual observations to brain.py
 
 Called by brain.py via: analyze_charts_with_gpt_vision(...)
+  Returns: {"chart_analysis": {"H1": "...", "H4": "..."}, "_metadata": {...}}
+
+brain.py then uses these observations as part of its full decision context.
 Test helpers: save_chart_image(...), get_chart_url(...)
 """
 
@@ -34,57 +37,69 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # =============================================================================
 
 CHART_ANALYSIS_PROMPT = """
-You are analyzing a TradingView chart image for trading decisions.
+You are a professional chart analyst performing pure visual technical analysis on TradingView chart images.
 
-ANALYZE THE FOLLOWING VISUAL ELEMENTS:
+You will receive one or more labelled chart images. Each image is preceded by a label like "--- H1 TIMEFRAME CHART ---".
+
+For EACH chart image, provide a detailed, objective visual analysis describing exactly what you see.
+
+ANALYZE EACH CHART FOR:
 
 1. TREND & STRUCTURE:
    - Overall trend direction (uptrend, downtrend, sideways/ranging)
-   - Market structure: Higher Highs (HH), Higher Lows (HL), Lower Highs (LH), Lower Lows (LL)
-   - Trendlines and channels visible on the chart
-   - Break of structure (BOS) - when price breaks recent swing highs/lows
+   - Market structure sequence: Higher Highs (HH), Higher Lows (HL), Lower Highs (LH), Lower Lows (LL)
+   - Visible trendlines or channels
+   - Recent breaks of structure (BOS) — where price broke through a prior swing high/low
 
-2. KEY PRICE LEVELS:
-   - Major support and resistance zones (horizontal levels where price has reacted multiple times)
-   - Swing highs and swing lows (local peaks and troughs)
-   - Round numbers / psychological levels (e.g., 1.3000, 1.2500)
-   - Areas of consolidation or price congestion
+2. KEY PRICE LEVELS (use exact prices where readable on the chart):
+   - Major support and resistance zones (levels price has reacted to multiple times)
+   - Swing highs and swing lows (notable peaks and troughs)
+   - Round numbers or psychological levels (e.g. 1.3000, 1.2500)
+   - Areas of price congestion or consolidation
 
 3. CANDLESTICK PATTERNS & PRICE ACTION:
-   - Recent candle formations (engulfing, pin bars, doji, etc.)
-   - Wicks and rejection at levels (long wicks indicate rejection)
-   - Consolidation patterns (triangles, rectangles, flags)
-   - Gap analysis (if visible)
+   - Notable recent candle formations (engulfing, pin bars, doji, inside bars, etc.)
+   - Strong wick rejections at levels
+   - Consolidation patterns (triangles, flags, rectangles, wedges)
 
-4. FAIR VALUE GAPS (FVG):
-   - Look for 3-candle patterns where the middle candle's wick doesn't overlap with candles on either side
-   - These appear as "gaps" or "imbalances" on the chart
-   - Price often returns to fill these gaps
+4. FAIR VALUE GAPS (FVG) / IMBALANCES:
+   - 3-candle patterns where the middle candle creates a gap not covered by the first and third candle wicks
+   - Note approximate price range of any visible FVGs
+   - Whether price has returned to fill them or they remain open
 
 5. LIQUIDITY ZONES:
-   - Areas where stops might be clustered (above swing highs for shorts, below swing lows for longs)
-   - Equal highs/lows that could be "liquidity grabs"
-   - Areas of high trading activity (visible volume if shown)
+   - Equal highs or equal lows (clustered levels that attract price for liquidity grabs)
+   - Obvious stop clusters: above swing highs (sell-side liq.) or below swing lows (buy-side liq.)
+   - Areas of dense candle bodies indicating high-activity zones
 
 6. CURRENT PRICE POSITION:
-   - Where is price relative to key levels?
-   - Is price at support, resistance, or in between?
-   - Distance from recent highs/lows
-   - Any immediate reaction zones nearby?
+   - Where is the current candle/price relative to key levels?
+   - Is price at support, at resistance, breaking out, or in the middle of a range?
+   - How far is price from the nearest significant level?
 
 7. MOMENTUM & VOLATILITY:
-   - Are candles getting larger or smaller? (expansion vs contraction)
-   - Speed of price movement (fast moves vs slow grinding)
-   - Any signs of exhaustion? (smaller bodies, longer wicks)
+   - Expanding or contracting candle bodies (acceleration vs. exhaustion)?
+   - Speed of recent price movement
+   - Any visible signs of momentum shift (smaller bodies, longer wicks, spinning tops)?
 
-IMPORTANT NOTES:
-- Be objective - describe what you SEE, not what you think should happen
-- Identify BOTH bullish and bearish scenarios
-- Point out conflicting signals if present
-- Use specific price levels when describing zones
-- Mention timeframe context (e.g., "on the 4H chart...")
+IMPORTANT:
+- Be objective — describe only what you can SEE on the chart
+- Use specific price levels wherever visible
+- Identify BOTH bullish and bearish scenarios present on the chart
+- Flag any conflicting signals across the chart
+- Do NOT make trading decisions — only describe what you observe
 
-Your analysis should be factual, concise, and actionable for trading decisions.
+OUTPUT FORMAT:
+Return a JSON object with one key per timeframe label (e.g. "H1", "H4", "D1", "W1").
+Each value must be a detailed string of your visual observations for that chart.
+
+Example:
+{
+  "H1": "The H1 chart shows a clear downtrend with LH/LL structure since the swing high at 1.0950. Price is currently testing a support zone at 1.0870 that has held twice before. A small bullish engulfing formed on the last closed candle, but momentum is still bearish with expanding red bodies...",
+  "H4": "On the 4H chart, price has been consolidating between 1.0860 support and 1.0930 resistance for the past 8 candles. There is an open FVG between 1.0900 and 1.0915. No clear directional bias — equal highs at 1.0930 could attract price for a liquidity grab before a reversal..."
+}
+
+Return ONLY the JSON object. No markdown, no extra text outside the JSON.
 """
 
 
@@ -266,24 +281,36 @@ def format_symbol_for_chart(symbol: str, asset_type: str = "forex") -> str:
 def analyze_charts_with_gpt_vision(
     symbol: str,
     timeframes: List[str],
-    context: str,
-    system_prompt: str,
     asset_type: str = "forex"
 ) -> Dict[str, Any]:
     """
-    Fetch charts for every requested timeframe, send them + context to
-    GPT Vision, and return the parsed JSON trading decision.
+    Fetch charts for every requested timeframe and send them to GPT Vision
+    for pure visual technical analysis — no text context, no trading decision.
+
+    GPT Vision receives only the CHART_ANALYSIS_PROMPT and the chart images.
+    This lets it focus entirely on what it sees, producing richer observations.
+
+    brain.py then combines these observations with OHLC data, market data,
+    positions, and analysis notes before making the final trading decision.
 
     Args:
-        symbol:        Raw symbol e.g. "EURUSD"
-        timeframes:    List of timeframes e.g. ["H1", "H4", "D1"]
-        context:       Full text context built by brain.py (OHLC summary,
-                       market data, current positions, previous analysis notes)
-        system_prompt: The SOD or Intraday prompt from prompt.py
-        asset_type:    "forex" | "crypto" | "stock"
+        symbol:     Raw symbol e.g. "EURUSD"
+        timeframes: List of timeframes e.g. ["H1", "H4", "D1", "W1"]
+        asset_type: "forex" | "crypto" | "stock"
 
     Returns:
-        Parsed JSON dict with the trading decision + _metadata key.
+        {
+            "chart_analysis": {
+                "H1": "detailed visual description...",
+                "H4": "detailed visual description...",
+                ...
+            },
+            "_metadata": {
+                "symbol": "FX:EURUSD",
+                "timeframes_analyzed": [...],
+                "timeframes_requested": [...]
+            }
+        }
 
     Raises:
         ValueError if OPENAI_API_KEY is missing or all chart fetches fail.
@@ -292,7 +319,7 @@ def analyze_charts_with_gpt_vision(
         raise ValueError("OPENAI_API_KEY not set -- cannot run analysis")
 
     formatted_symbol = format_symbol_for_chart(symbol, asset_type)
-    print(f"\n[analysis] Starting: {formatted_symbol} {', '.join(timeframes)}")
+    print(f"\n[analysis] Starting visual chart analysis: {formatted_symbol} {', '.join(timeframes)}")
 
     # --- fetch all charts ---
     chart_images = []
@@ -316,18 +343,18 @@ def analyze_charts_with_gpt_vision(
         )
 
     print(f"[analysis] Fetched {len(chart_images)}/{len(timeframes)} charts")
-    print("[analysis] Sending to GPT Vision...")
+    print("[analysis] Sending to GPT Vision for pure visual analysis...")
 
     # --- build Vision API message ---
-    # First part: chart analysis instructions + all context text
+    # System: chart analysis instructions only — no trading context
+    # User: one label + one image per timeframe
     content = [
         {
             "type": "text",
-            "text": f"{CHART_ANALYSIS_PROMPT}\n\n---\n\nCONTEXT DATA:\n{context}"
+            "text": CHART_ANALYSIS_PROMPT
         }
     ]
 
-    # Then one label + one image per timeframe
     for img in chart_images:
         content.append({
             "type": "text",
@@ -339,8 +366,7 @@ def analyze_charts_with_gpt_vision(
         })
 
     messages = [
-        {"role": "system",  "content": system_prompt},
-        {"role": "user",    "content": content}
+        {"role": "user", "content": content}
     ]
 
     # --- call OpenAI Vision ---
@@ -348,19 +374,22 @@ def analyze_charts_with_gpt_vision(
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            max_tokens=4000,
-            temperature=0.3
+            max_tokens=3000,
+            temperature=0.2
         )
         response_text = response.choices[0].message.content
         print(f"[analysis] GPT Vision response received ({len(response_text)} chars)")
 
-        result = _parse_gpt_response(response_text)
-        result["_metadata"] = {
-            "symbol": formatted_symbol,
-            "timeframes_analyzed": [img["timeframe"] for img in chart_images],
-            "timeframes_requested": timeframes,
+        chart_observations = _parse_chart_response(response_text, chart_images)
+
+        return {
+            "chart_analysis": chart_observations,
+            "_metadata": {
+                "symbol": formatted_symbol,
+                "timeframes_analyzed": [img["timeframe"] for img in chart_images],
+                "timeframes_requested": timeframes,
+            }
         }
-        return result
 
     except Exception as e:
         print(f"[analysis] GPT Vision call failed: {e}")
@@ -368,48 +397,44 @@ def analyze_charts_with_gpt_vision(
 
 
 # =============================================================================
-# INTERNAL — JSON PARSER
+# INTERNAL — CHART RESPONSE PARSER
 # =============================================================================
 
-def _parse_gpt_response(response_text: str) -> Dict[str, Any]:
+def _parse_chart_response(response_text: str, chart_images: list) -> Dict[str, Any]:
     """
-    Extract JSON from GPT's response.
+    Parse the per-timeframe JSON dict returned by GPT Vision.
 
-    GPT sometimes wraps the JSON in ```json ... ``` code fences.
-    We try several approaches to pull out the dict.
-    On total failure we return a safe WAIT default so no trade is placed.
+    GPT is asked to return: {"H1": "...", "H4": "...", ...}
+    If it wraps in markdown fences we strip them first.
+    On parse failure we fall back to storing the raw text under each timeframe key
+    so brain.py still receives something useful.
     """
     try:
         # Strip markdown fences if present
         if "```json" in response_text:
-            start = response_text.find("```json") + 7
-            end   = response_text.find("```", start)
+            start    = response_text.find("```json") + 7
+            end      = response_text.find("```", start)
             json_str = response_text[start:end].strip()
         elif "```" in response_text:
-            start = response_text.find("```") + 3
-            end   = response_text.find("```", start)
+            start    = response_text.find("```") + 3
+            end      = response_text.find("```", start)
             json_str = response_text[start:end].strip()
         else:
             json_str = response_text.strip()
 
-        # Regex grab of the outermost { ... }
         match = re.search(r"\{.*\}", json_str, re.DOTALL)
         if match:
             parsed = json.loads(match.group())
-            print("[parse] JSON parsed OK")
+            print("[parse] Chart analysis JSON parsed OK")
             return parsed
 
         parsed = json.loads(json_str)
-        print("[parse] JSON parsed OK")
+        print("[parse] Chart analysis JSON parsed OK")
         return parsed
 
     except json.JSONDecodeError as e:
-        print(f"[parse] Could not parse JSON: {e}")
-        print(f"[parse] Raw response (first 500 chars): {response_text[:500]}")
-        return {
-            "action": "WAIT",
-            "summary": "Failed to parse AI response",
-            "explanation": f"JSON parse error: {e}",
-            "decision": {"action": "WAIT", "next_review_time": None},
-            "_error": "parse_failure",
-        }
+        print(f"[parse] Could not parse chart analysis JSON: {e}")
+        # Fall back: store the raw text under each timeframe key
+        fallback = {img["timeframe"]: response_text for img in chart_images}
+        fallback["_parse_error"] = str(e)
+        return fallback
