@@ -393,7 +393,7 @@ def internal_error(error):
     }), 500
 
 
-def _build_chat_context(symbol: str) -> str:
+def _build_chat_context(symbol: str, user_id: str = None) -> str:
     """
     Load all available context from the DB and assemble it into a single
     context string for the chat assistant.
@@ -403,6 +403,7 @@ def _build_chat_context(symbol: str) -> str:
       - sod_note          — today's SOD analysis and trading plan
       - last_run_note     — most recent intraday analysis
       - current_positions — live open positions
+      - recent_messages   — user's conversation history (if user_id provided)
     """
     from database import get_analysis_note, get_current_positions
     from datetime import datetime, timezone
@@ -457,6 +458,22 @@ def _build_chat_context(symbol: str) -> str:
     else:
         parts += ["=== CURRENT OPEN POSITIONS ===", "No open positions.", ""]
 
+    if user_id:
+        try:
+            from user_tracking import get_messages
+            history = get_messages(user_id)
+            if history:
+                history_lines = [
+                    f"{m['role'].upper()}: {m['content']}" for m in history
+                ]
+                parts += [
+                    "=== CONVERSATION HISTORY ===",
+                    "\n".join(history_lines),
+                    ""
+                ]
+        except Exception as e:
+            print(f"[chat] Could not load message history: {e}")
+
     return "\n".join(parts)
 
 
@@ -466,9 +483,12 @@ def chat():
     BotCore conversational chat endpoint.
 
     Request JSON:
-      { "message": "What's the current market regime?", "symbol": "GBPUSD" }
+      {
+        "message": "What's the current market regime?",
+        "symbol":  "GBPUSD",   (optional, defaults to GBPUSD)
+        "user_id": "<uuid>"    (optional — enables message history)
+      }
 
-    symbol is optional — defaults to GBPUSD.
     Returns the full response in one payload.
     """
     try:
@@ -478,6 +498,7 @@ def chat():
 
         message = data.get("message", "").strip()
         symbol  = data.get("symbol", "GBPUSD").upper()
+        user_id = data.get("user_id")
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -489,8 +510,8 @@ def chat():
         from openai import OpenAI
         from prompt import get_botcore_prompt
 
-        context  = _build_chat_context(symbol)
-        client   = OpenAI(api_key=openai_key)
+        context = _build_chat_context(symbol, user_id)
+        client  = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -503,6 +524,14 @@ def chat():
         )
 
         reply = response.choices[0].message.content
+
+        if user_id:
+            try:
+                from user_tracking import add_message
+                add_message(user_id, "user",      message)
+                add_message(user_id, "assistant", reply)
+            except Exception as e:
+                print(f"[chat] Failed to save message history: {e}")
 
         return jsonify({
             "success":  True,
@@ -522,7 +551,11 @@ def chat_stream():
     BotCore streaming chat endpoint (newline-delimited JSON).
 
     Request JSON:
-      { "message": "Explain the current DXY outlook", "symbol": "GBPUSD" }
+      {
+        "message": "Explain the current DXY outlook",
+        "symbol":  "GBPUSD",  (optional, defaults to GBPUSD)
+        "user_id": "<uuid>"   (optional — enables message history)
+      }
 
     Streams chunks as newline-delimited JSON:
       {"type": "chunk",  "content": "The DXY is..."}
@@ -536,6 +569,7 @@ def chat_stream():
 
         message = data.get("message", "").strip()
         symbol  = data.get("symbol", "GBPUSD").upper()
+        user_id = data.get("user_id")
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -544,9 +578,10 @@ def chat_stream():
         if not openai_key:
             return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
 
-        context = _build_chat_context(symbol)
+        context = _build_chat_context(symbol, user_id)
 
         def generate():
+            full_reply = []
             try:
                 from openai import OpenAI
                 from prompt import get_botcore_prompt
@@ -566,7 +601,17 @@ def chat_stream():
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content
                     if delta:
+                        full_reply.append(delta)
                         yield json.dumps({"type": "chunk", "content": delta}) + "\n"
+
+                # Save history after the full response is streamed
+                if user_id and full_reply:
+                    try:
+                        from user_tracking import add_message
+                        add_message(user_id, "user",      message)
+                        add_message(user_id, "assistant", "".join(full_reply))
+                    except Exception as hist_err:
+                        print(f"[chat/stream] Failed to save history: {hist_err}")
 
                 yield json.dumps({"type": "done", "content": ""}) + "\n"
 
@@ -584,6 +629,177 @@ def chat_stream():
         return jsonify({"error": str(e)}), 500
 
 
+# =============================================================================
+# AUTH ENDPOINTS
+# =============================================================================
+
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    """
+    Register a new user for the BotCore chat interface.
+
+    Request JSON:
+      { "email": "you@example.com", "password": "...", "full_name": "Your Name" }
+
+    Returns:
+      { "success": true, "user_id": "...", "email": "...", "full_name": "..." }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        email     = (data.get("email")     or "").strip()
+        password  =  data.get("password")  or ""
+        full_name = (data.get("full_name") or "").strip()
+
+        if not email:
+            return jsonify({"error": "Missing email"}), 400
+        if not password:
+            return jsonify({"error": "Missing password"}), 400
+        if not full_name:
+            return jsonify({"error": "Missing full_name"}), 400
+
+        from user_tracking import create_user
+
+        try:
+            user = create_user(email=email, password=password, full_name=full_name)
+        except ValueError as ve:
+            return jsonify({"error": str(ve), "success": False}), 409
+
+        if not user:
+            return jsonify({"error": "Failed to create user", "success": False}), 500
+
+        return jsonify({
+            "success":   True,
+            "user_id":   user["user_id"],
+            "email":     user["email"],
+            "full_name": user["full_name"],
+            "created_at": user["created_at"]
+        }), 201
+
+    except Exception as e:
+        print(f"[auth/register] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    """
+    Authenticate an existing user.
+
+    Request JSON:
+      { "email": "you@example.com", "password": "..." }
+
+    Returns:
+      { "success": true, "user_id": "...", "email": "...", "full_name": "..." }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        email    = (data.get("email")    or "").strip()
+        password =  data.get("password") or ""
+
+        if not email:
+            return jsonify({"error": "Missing email"}), 400
+        if not password:
+            return jsonify({"error": "Missing password"}), 400
+
+        from user_tracking import get_user_by_email, verify_password
+
+        user = get_user_by_email(email)
+        if not user:
+            return jsonify({"error": "Email not found", "success": False}), 404
+
+        if not verify_password(password, user.get("password", "")):
+            return jsonify({"error": "Invalid password", "success": False}), 401
+
+        return jsonify({
+            "success":    True,
+            "user_id":    user["user_id"],
+            "email":      user["email"],
+            "full_name":  user["full_name"],
+            "created_at": user["created_at"]
+        })
+
+    except Exception as e:
+        print(f"[auth/login] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def auth_me():
+    """
+    Return basic profile info for a user_id.
+    Query param: ?user_id=<uuid>
+    """
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        if not user_id:
+            return jsonify({"error": "Missing user_id"}), 400
+
+        from user_tracking import get_user_by_id
+        user = get_user_by_id(user_id)
+
+        if not user:
+            return jsonify({"error": "User not found", "success": False}), 404
+
+        return jsonify({"success": True, **user})
+
+    except Exception as e:
+        print(f"[auth/me] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/auth/history", methods=["GET"])
+def auth_history():
+    """
+    Return the recent message history for a user.
+    Query param: ?user_id=<uuid>
+    """
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        if not user_id:
+            return jsonify({"error": "Missing user_id"}), 400
+
+        from user_tracking import get_messages, is_user_active
+        if not is_user_active(user_id):
+            return jsonify({"error": "User not found", "success": False}), 404
+
+        messages = get_messages(user_id)
+        return jsonify({"success": True, "user_id": user_id, "messages": messages})
+
+    except Exception as e:
+        print(f"[auth/history] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/auth/history", methods=["DELETE"])
+def auth_history_clear():
+    """
+    Clear the message history for a user.
+    Request JSON: { "user_id": "<uuid>" }
+    """
+    try:
+        data    = request.get_json() or {}
+        user_id = data.get("user_id", "").strip()
+        if not user_id:
+            return jsonify({"error": "Missing user_id"}), 400
+
+        from user_tracking import clear_messages, is_user_active
+        if not is_user_active(user_id):
+            return jsonify({"error": "User not found", "success": False}), 404
+
+        clear_messages(user_id)
+        return jsonify({"success": True, "user_id": user_id, "message": "History cleared"})
+
+    except Exception as e:
+        print(f"[auth/history/clear] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
 if __name__ == "__main__":
     port = int(os.getenv('PORT', 5000))
     host = os.getenv('HOST', '0.0.0.0')
@@ -591,5 +807,6 @@ if __name__ == "__main__":
     print(f"Starting BotCore API on {host}:{port}")
     print(f"Trading endpoints: http://{host}:{port}/api/trading/")
     print(f"Chat endpoints:    http://{host}:{port}/api/chat")
+    print(f"Auth endpoints:    http://{host}:{port}/api/auth/")
 
     app.run(host=host, port=port, debug=False)
