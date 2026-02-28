@@ -8,9 +8,10 @@ Provides REST API endpoints for MetaTrader 5 EA to:
 - Check system status
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import os
+import json
 from dotenv import load_dotenv
 from brain import sod_action, intraday_action
 from database import store_current_positions, get_current_positions
@@ -25,11 +26,25 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'botcore-secret-key-change-in
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    """Health check endpoint."""
+    """
+    Health check endpoint — also initialises DB tables on first boot.
+    Railway hits this after deploy; if DATABASE_URL is set the tables
+    are created automatically (CREATE TABLE IF NOT EXISTS — safe to repeat).
+    """
+    db_status = "not_configured"
+    if os.getenv("DATABASE_URL"):
+        try:
+            from database import init_database
+            init_database()
+            db_status = "ok"
+        except Exception as e:
+            db_status = f"error: {e}"
+
     return jsonify({
-        "status": "healthy",
+        "status":  "healthy",
         "service": "BotCore API",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "database": db_status
     }), 200
 
 
@@ -275,8 +290,7 @@ def trading_execute():
         # Log execution to database
         from database import save_trade_event
         save_trade_event(
-            setup_id=data.get("setup_id"),
-            symbol=data.get("symbol"),
+            symbol=data.get("symbol", "UNKNOWN"),
             event_type="EXECUTION",
             event_data=data
         )
@@ -379,11 +393,203 @@ def internal_error(error):
     }), 500
 
 
+def _build_chat_context(symbol: str) -> str:
+    """
+    Load all available context from the DB and assemble it into a single
+    context string for the chat assistant.
+
+    Reads (never fetches live):
+      - market_data_note  — synthesized market intelligence
+      - sod_note          — today's SOD analysis and trading plan
+      - last_run_note     — most recent intraday analysis
+      - current_positions — live open positions
+    """
+    from database import get_analysis_note, get_current_positions
+    from datetime import datetime, timezone
+
+    parts = [
+        f"CURRENT TIME: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"SYMBOL IN FOCUS: {symbol}",
+        ""
+    ]
+
+    market_intel = get_analysis_note('GLOBAL', 'market_data_note')
+    if market_intel:
+        fetched_at = market_intel.get('_fetched_at') or market_intel.get('_db_created_at', 'unknown')
+        parts += [
+            f"=== MARKET INTELLIGENCE (as of {fetched_at}) ===",
+            json.dumps({k: v for k, v in market_intel.items()
+                        if not k.startswith('_')}, indent=2),
+            ""
+        ]
+    else:
+        parts += ["=== MARKET INTELLIGENCE ===", "Not yet available — SOD has not run today.", ""]
+
+    sod_note = get_analysis_note(symbol, 'sod_note')
+    if sod_note:
+        parts += [
+            "=== TODAY'S SOD ANALYSIS (trading plan and bias) ===",
+            json.dumps({k: v for k, v in sod_note.items()
+                        if not k.startswith('_')}, indent=2),
+            ""
+        ]
+    else:
+        parts += ["=== TODAY'S SOD ANALYSIS ===", "Not yet available — SOD has not run today.", ""]
+
+    last_run = get_analysis_note(symbol, 'last_run_note')
+    if last_run:
+        parts += [
+            "=== LAST INTRADAY ANALYSIS ===",
+            json.dumps({k: v for k, v in last_run.items()
+                        if not k.startswith('_')}, indent=2),
+            ""
+        ]
+    else:
+        parts += ["=== LAST INTRADAY ANALYSIS ===", "No intraday runs yet today.", ""]
+
+    positions = get_current_positions(symbol)
+    if positions:
+        parts += [
+            "=== CURRENT OPEN POSITIONS ===",
+            json.dumps(positions, indent=2),
+            ""
+        ]
+    else:
+        parts += ["=== CURRENT OPEN POSITIONS ===", "No open positions.", ""]
+
+    return "\n".join(parts)
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """
+    BotCore conversational chat endpoint.
+
+    Request JSON:
+      { "message": "What's the current market regime?", "symbol": "GBPUSD" }
+
+    symbol is optional — defaults to GBPUSD.
+    Returns the full response in one payload.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        message = data.get("message", "").strip()
+        symbol  = data.get("symbol", "GBPUSD").upper()
+
+        if not message:
+            return jsonify({"error": "Missing message"}), 400
+
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key:
+            return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
+
+        from openai import OpenAI
+        from prompt import get_botcore_prompt
+
+        context  = _build_chat_context(symbol)
+        client   = OpenAI(api_key=openai_key)
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": get_botcore_prompt()},
+                {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
+            ],
+            max_tokens=2000,
+            temperature=0.4
+        )
+
+        reply = response.choices[0].message.content
+
+        return jsonify({
+            "success":  True,
+            "symbol":   symbol,
+            "message":  message,
+            "response": reply
+        })
+
+    except Exception as e:
+        print(f"[chat] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    """
+    BotCore streaming chat endpoint (newline-delimited JSON).
+
+    Request JSON:
+      { "message": "Explain the current DXY outlook", "symbol": "GBPUSD" }
+
+    Streams chunks as newline-delimited JSON:
+      {"type": "chunk",  "content": "The DXY is..."}
+      {"type": "done",   "content": ""}
+      {"type": "error",  "content": "error message"}
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        message = data.get("message", "").strip()
+        symbol  = data.get("symbol", "GBPUSD").upper()
+
+        if not message:
+            return jsonify({"error": "Missing message"}), 400
+
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key:
+            return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
+
+        context = _build_chat_context(symbol)
+
+        def generate():
+            try:
+                from openai import OpenAI
+                from prompt import get_botcore_prompt
+
+                client = OpenAI(api_key=openai_key)
+                stream = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": get_botcore_prompt()},
+                        {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
+                    ],
+                    max_tokens=2000,
+                    temperature=0.4,
+                    stream=True
+                )
+
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield json.dumps({"type": "chunk", "content": delta}) + "\n"
+
+                yield json.dumps({"type": "done", "content": ""}) + "\n"
+
+            except Exception as e:
+                print(f"[chat/stream] Error: {e}")
+                yield json.dumps({"type": "error", "content": str(e)}) + "\n"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson"
+        )
+
+    except Exception as e:
+        print(f"[chat/stream] Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.getenv('PORT', 5000))
     host = os.getenv('HOST', '0.0.0.0')
-    
-    print(f"🚀 Starting BotCore API on {host}:{port}")
-    print(f"📊 Trading endpoints available at http://{host}:{port}/api/trading/")
-    
+
+    print(f"Starting BotCore API on {host}:{port}")
+    print(f"Trading endpoints: http://{host}:{port}/api/trading/")
+    print(f"Chat endpoints:    http://{host}:{port}/api/chat")
+
     app.run(host=host, port=port, debug=False)

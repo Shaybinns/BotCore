@@ -32,8 +32,11 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
     Load market data from DB cache (market_data_note) if fresh.
     Re-fetches from APIs only if the cache is missing or older than MARKET_DATA_CACHE_HOURS.
     Used by intraday_action inside the parallel executor.
+
+    Stored under symbol="GLOBAL" — market intelligence is not symbol-specific
+    (VIX, DXY, Fed policy, news apply to all pairs equally).
     """
-    cached = get_analysis_note(symbol, 'market_data_note')
+    cached = get_analysis_note('GLOBAL', 'market_data_note')
     if cached:
         created_at_str = cached.get('_db_created_at')
         if created_at_str:
@@ -54,7 +57,7 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
         print("[market] No market_data_note in DB — fetching fresh...")
 
     data = get_market_data(symbol)
-    save_analysis_note(symbol, 'market_data_note', data)
+    save_analysis_note('GLOBAL', 'market_data_note', data)
     print("[market] Market data refreshed and saved to DB")
     return data
 
@@ -107,8 +110,8 @@ def sod_action(
 
     def _fetch_market_data_sod():
         data = get_market_data(symbol)
-        save_analysis_note(symbol, 'market_data_note', data)
-        print("[market] Market data fetched and saved to DB")
+        save_analysis_note('GLOBAL', 'market_data_note', data)
+        print("[market] Market data fetched and saved to DB (GLOBAL)")
         return data
 
     def _run_ohlc():
@@ -196,7 +199,7 @@ def sod_action(
         "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
         json.dumps(chart_observations, indent=2),
         "",
-        "=== MARKET DATA (News, Macro, Economic Calendar) ===",
+        "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
         json.dumps(market_context, indent=2)
     ])
 
@@ -392,7 +395,7 @@ def intraday_action(
         "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
         json.dumps(chart_observations, indent=2),
         "",
-        "=== MARKET DATA (News, Macro, Economic Calendar) ===",
+        "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
         json.dumps(market_context, indent=2)
     ])
 

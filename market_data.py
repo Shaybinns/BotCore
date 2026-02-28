@@ -1,37 +1,42 @@
 """
 Market Data Service
 
-Collects real-time market context for the trading AI:
-  1. RapidAPI (Yahoo Finance) - key risk assets: VIX, DXY, yields, gold, oil, indices
-  2. Perplexity #1 - macro data: CPI, NFP, Fed policy, rate expectations
-  3. Perplexity #2 - upcoming catalysts: economic calendar, news, geopolitics
+Flow:
+  1. Fetch raw data from 3 sources in parallel:
+       - RapidAPI (Yahoo Finance) — live prices: VIX, DXY, yields, gold, oil, indices
+       - Perplexity #1           — macro: CPI, NFP, Fed policy, rate expectations
+       - Perplexity #2           — catalysts: economic calendar, news, geopolitics
+  2. Synthesize all raw data into structured forex market intelligence (via GPT-4o-mini)
+  3. Return the synthesis dict — brain.py saves this to DB as market_data_note
 
-Called by brain.py:  market_context = get_market_data(symbol)
-Result is JSON-dumped into the GPT Vision context string.
+The synthesis is done ONCE at SOD (or when cache is stale).
+Every intraday AI call reads the synthesis straight from the DB — no re-fetching.
 
 APIs used (already in .env):
-  RAPIDAPI_KEY     - Yahoo Finance via RapidAPI
+  RAPIDAPI_KEY       - Yahoo Finance via RapidAPI
   OPENROUTER_API_KEY - Perplexity via OpenRouter
+  OPENAI_API_KEY     - GPT-4o-mini synthesis via OpenAI
 """
 
 import requests
 import os
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
-RAPIDAPI_KEY      = os.getenv("RAPIDAPI_KEY")
-OPENROUTER_KEY    = os.getenv("OPENROUTER_API_KEY")
+RAPIDAPI_KEY   = os.getenv("RAPIDAPI_KEY")
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 # =============================================================================
-# SECTION 1: RAPIDAPI - KEY RISK ASSETS
-# These are the assets most relevant to forex trading decisions.
+# SECTION 1: RAPIDAPI — KEY RISK ASSETS
 # =============================================================================
 
-# Symbols to fetch and their labels
 RISK_ASSETS = {
     "^VIX":     "VIX (Equity Volatility)",
     "DX-Y.NYB": "DXY (US Dollar Index)",
@@ -46,13 +51,9 @@ RISK_ASSETS = {
 
 
 def fetch_risk_assets() -> Dict[str, Any]:
-    """
-    Fetch key risk asset prices via RapidAPI (Yahoo Finance).
-
-    Returns a dict of asset name -> price data, or empty dict on failure.
-    """
+    """Fetch key risk asset prices via RapidAPI (Yahoo Finance)."""
     if not RAPIDAPI_KEY:
-        print("[market_data] RAPIDAPI_KEY not set - skipping risk assets")
+        print("[market] RAPIDAPI_KEY not set — skipping risk assets")
         return {}
 
     url = "https://yahoo-finance166.p.rapidapi.com/api/market/get-quote-v2"
@@ -62,11 +63,11 @@ def fetch_risk_assets() -> Dict[str, Any]:
     }
     params = {
         "symbols": ",".join(RISK_ASSETS.keys()),
-        "fields": "quoteSummary"
+        "fields":  "quoteSummary"
     }
 
     try:
-        print("[market_data] Fetching risk assets from RapidAPI...")
+        print("[market] Fetching risk assets from RapidAPI...")
         response = requests.get(url, headers=headers, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
@@ -79,37 +80,33 @@ def fetch_risk_assets() -> Dict[str, Any]:
                 continue
             summary = item.get("quoteSummary", {}).get("summaryDetail", {})
             assets[RISK_ASSETS[symbol]] = {
-                "price":              item.get("regularMarketPrice"),
-                "change_pct":         item.get("regularMarketChangePercent"),
-                "fifty_day_avg":      summary.get("fiftyDayAverage"),
+                "price":               item.get("regularMarketPrice"),
+                "change_pct":          item.get("regularMarketChangePercent"),
+                "fifty_day_avg":       summary.get("fiftyDayAverage"),
                 "two_hundred_day_avg": summary.get("twoHundredDayAverage"),
                 "fifty_two_week_high": summary.get("fiftyTwoWeekHigh"),
                 "fifty_two_week_low":  summary.get("fiftyTwoWeekLow"),
             }
 
-        print(f"[market_data] Risk assets fetched: {len(assets)}/{len(RISK_ASSETS)}")
+        print(f"[market] Risk assets: {len(assets)}/{len(RISK_ASSETS)} fetched")
         return assets
 
     except Exception as e:
-        print(f"[market_data] RapidAPI error: {e}")
+        print(f"[market] RapidAPI error: {e}")
         return {}
 
 
 # =============================================================================
-# SECTION 2: PERPLEXITY #1 - MACRO & FED POLICY
+# SECTION 2: PERPLEXITY #1 — MACRO & FED POLICY
 # =============================================================================
 
 def fetch_macro_and_fed() -> str:
-    """
-    Fetch macroeconomic data and Fed policy via Perplexity (OpenRouter).
-
-    Returns raw text string for GPT to read, or error message on failure.
-    """
+    """Fetch macro data and Fed policy via Perplexity (OpenRouter)."""
     if not OPENROUTER_KEY:
-        print("[market_data] OPENROUTER_API_KEY not set - skipping macro data")
+        print("[market] OPENROUTER_API_KEY not set — skipping macro data")
         return "Macro data unavailable (no API key)."
 
-    now = datetime.now(timezone.utc)
+    now          = datetime.now(timezone.utc)
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -131,7 +128,7 @@ For each: current value, previous value, trend direction (rising/falling/stable)
 
 === PART 2: FED POLICY & RATE EXPECTATIONS ===
 - Current Fed stance and forward guidance
-- Market-implied rate expectations for next 2-3 FOMC meetings (from FedWatch or Investing.com)
+- Market-implied rate expectations for next 2-3 FOMC meetings
 - Divergence between Fed guidance and market pricing (in basis points)
 - How this affects DXY and major forex pairs (EUR/USD, GBP/USD outlook)
 
@@ -144,7 +141,7 @@ Brief fundamental bias for:
 Be concise and specific. Focus on what matters for short-term forex trading decisions."""
 
     try:
-        print("[market_data] Fetching macro/Fed data from Perplexity...")
+        print("[market] Fetching macro/Fed data from Perplexity...")
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -152,37 +149,33 @@ Be concise and specific. Focus on what matters for short-term forex trading deci
                 "Content-Type":  "application/json",
             },
             json={
-                "model": "perplexity/sonar-pro",
-                "messages": [{"role": "user", "content": prompt}],
+                "model":      "perplexity/sonar-pro",
+                "messages":   [{"role": "user", "content": prompt}],
                 "max_tokens": 1500
             },
             timeout=30
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-        print("[market_data] Macro/Fed data fetched OK")
+        print("[market] Macro/Fed data fetched OK")
         return content
 
     except Exception as e:
-        print(f"[market_data] Perplexity #1 error: {e}")
+        print(f"[market] Perplexity #1 error: {e}")
         return f"Macro data fetch failed: {e}"
 
 
 # =============================================================================
-# SECTION 3: PERPLEXITY #2 - UPCOMING CATALYSTS & NEWS
+# SECTION 3: PERPLEXITY #2 — CATALYSTS & NEWS
 # =============================================================================
 
 def fetch_catalysts_and_news() -> str:
-    """
-    Fetch upcoming economic events and breaking news via Perplexity (OpenRouter).
-
-    Returns raw text string for GPT to read, or error message on failure.
-    """
+    """Fetch upcoming economic events and breaking news via Perplexity (OpenRouter)."""
     if not OPENROUTER_KEY:
-        print("[market_data] OPENROUTER_API_KEY not set - skipping catalysts")
+        print("[market] OPENROUTER_API_KEY not set — skipping catalysts")
         return "Catalyst data unavailable (no API key)."
 
-    now = datetime.now(timezone.utc)
+    now          = datetime.now(timezone.utc)
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -208,15 +201,14 @@ For each event:
 - Why it matters for forex
 
 === PART 3: RISK ENVIRONMENT ===
-Current risk-on / risk-off conditions:
 - What is driving overall market sentiment right now?
 - Any active geopolitical risks affecting safe havens (USD, JPY, Gold, CHF)?
-- Are there any scheduled events this week that could cause a significant volatility spike?
+- Any scheduled events this week that could cause significant volatility?
 
 Be brief and actionable. A forex trader is reading this before entering trades."""
 
     try:
-        print("[market_data] Fetching catalysts/news from Perplexity...")
+        print("[market] Fetching catalysts/news from Perplexity...")
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -224,20 +216,139 @@ Be brief and actionable. A forex trader is reading this before entering trades."
                 "Content-Type":  "application/json",
             },
             json={
-                "model": "perplexity/sonar-pro",
-                "messages": [{"role": "user", "content": prompt}],
+                "model":      "perplexity/sonar-pro",
+                "messages":   [{"role": "user", "content": prompt}],
                 "max_tokens": 1500
             },
             timeout=30
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-        print("[market_data] Catalysts/news fetched OK")
+        print("[market] Catalysts/news fetched OK")
         return content
 
     except Exception as e:
-        print(f"[market_data] Perplexity #2 error: {e}")
+        print(f"[market] Perplexity #2 error: {e}")
         return f"Catalyst data fetch failed: {e}"
+
+
+# =============================================================================
+# SECTION 4: SYNTHESIS — structured forex market intelligence
+# Collates all raw data into a clean JSON dict saved to the DB.
+# GPT-4o reads the synthesis from DB — never the raw text.
+# =============================================================================
+
+SYNTHESIS_SYSTEM_PROMPT = """You are an elite institutional forex market analyst.
+
+You will receive raw market data (risk asset prices, macro text, news/catalyst text).
+Your job is to synthesize it into clean, structured intelligence for a forex trading AI.
+
+CRITICAL JSON RULES:
+- Output ONLY valid JSON — no markdown, no code blocks, no text outside the JSON
+- All newlines inside string values MUST be escaped as \\n
+- Do not use literal line breaks inside any string value
+
+Output this exact structure:
+{
+  "headline": "One punchy sentence capturing the current market environment",
+
+  "market_regime": "One of: Goldilocks | Late Cycle | Reflation | Stagflation | Soft Landing | Hard Landing | Deflation | Geopolitical Stress",
+
+  "risk_profile": "risk-on | risk-off | transitioning",
+
+  "market_summary": "300-400 word flowing analysis. Cover: current regime and why, risk-on/off evidence (VIX, DXY, Gold, yields), Fed stance vs market pricing, what this means for forex broadly, intermarket relationships driving flows. Use \\n\\n between paragraphs.",
+
+  "dxy_outlook": "2-3 sentences: DXY direction, key drivers, near-term bias (bullish/bearish/neutral)",
+
+  "forex_outlook": {
+    "EURUSD": "bias (BULLISH/BEARISH/NEUTRAL) + 1-2 sentence reasoning from ECB/Fed divergence and macro",
+    "GBPUSD": "bias + reasoning from BOE stance and UK data",
+    "USDJPY": "bias + reasoning from BOJ policy and yield differential"
+  },
+
+  "key_takeaways": [
+    "Most critical insight for trading today #1",
+    "Most critical insight for trading today #2",
+    "Most critical insight for trading today #3"
+  ],
+
+  "upcoming_catalysts": "Bullet list of HIGH/MEDIUM impact events next 48h with dates/times. Use \\n for line breaks.",
+
+  "risk_environment": "2 sentences: current risk environment and any active event risks to be aware of."
+}"""
+
+
+def synthesize_market_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pass all raw market data to GPT-4o-mini for synthesis into structured
+    forex market intelligence.
+
+    Returns the parsed intelligence dict, or a fallback error dict on failure.
+    """
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        print("[market] OPENAI_API_KEY not set — skipping synthesis")
+        return {"synthesis_error": "OPENAI_API_KEY not set", "raw_data": raw_data}
+
+    user_prompt = f"""Synthesize this market data into the required JSON intelligence report:
+
+TIMESTAMP: {raw_data.get('timestamp')}
+
+=== RISK ASSET PRICES ===
+{json.dumps(raw_data.get('risk_assets', {}), indent=2)}
+
+=== MACRO & FED POLICY (Perplexity) ===
+{raw_data.get('macro_and_fed', 'Not available')}
+
+=== NEWS, CATALYSTS & RISK ENVIRONMENT (Perplexity) ===
+{raw_data.get('catalysts_news', 'Not available')}
+
+Output ONLY valid JSON as specified."""
+
+    try:
+        print("[market] Synthesizing market intelligence via GPT-4o-mini...")
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user",   "content": user_prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.2
+        )
+
+        response_text = response.choices[0].message.content
+
+        # Strip markdown fences if present
+        if "```json" in response_text:
+            start = response_text.find("```json") + 7
+            end   = response_text.find("```", start)
+            response_text = response_text[start:end].strip()
+        elif "```" in response_text:
+            start = response_text.find("```") + 3
+            end   = response_text.find("```", start)
+            response_text = response_text[start:end].strip()
+
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if match:
+            intelligence = json.loads(match.group())
+        else:
+            intelligence = json.loads(response_text)
+
+        print("[market] Synthesis complete OK")
+        return intelligence
+
+    except Exception as e:
+        print(f"[market] Synthesis error: {e}")
+        return {
+            "synthesis_error": str(e),
+            "headline":        "Market intelligence synthesis failed",
+            "market_summary":  "Raw data was collected but synthesis failed. Check logs.",
+            "raw_data":        raw_data
+        }
 
 
 # =============================================================================
@@ -246,39 +357,72 @@ Be brief and actionable. A forex trader is reading this before entering trades."
 
 def get_market_data(symbol: str) -> Dict[str, Any]:
     """
-    Collect full market context for a trading symbol.
+    Collect and synthesize full market intelligence for a trading symbol.
 
-    Runs 3 data fetches in sequence:
-      1. RapidAPI  - live prices for VIX, DXY, yields, gold, oil, indices
-      2. Perplexity - macro data: CPI, NFP, Fed policy, rate expectations
-      3. Perplexity - upcoming events, breaking news, risk environment
+    Step 1 — Parallel fetch (all independent):
+      - RapidAPI  : live risk asset prices
+      - Perplexity: macro/Fed data
+      - Perplexity: news/catalysts
 
-    Each step is independent - if one fails, the others still run.
+    Step 2 — Synthesis (GPT-4o-mini):
+      Collates all raw data into structured forex intelligence JSON.
+
+    Step 3 — Return synthesis dict.
+      brain.py saves this to DB as market_data_note.
+      Every intraday AI decision reads the synthesis from DB — no re-fetching.
 
     Args:
-        symbol: Trading symbol being analysed, e.g. "EURUSD"
+        symbol: Trading symbol being analysed (e.g. "EURUSD") — for logging only,
+                market intelligence is global across all forex pairs.
 
     Returns:
-        Dict that brain.py JSON-dumps into the GPT Vision context string.
+        Structured market intelligence dict (synthesis output).
     """
-    print(f"\n[market_data] Starting market data collection for {symbol}...")
+    print(f"\n[market] Starting market data collection for {symbol}...")
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # --- 1. Risk assets ---
-    risk_assets = fetch_risk_assets()
+    # --- Step 1: Parallel fetch ---
+    risk_assets     = {}
+    macro_and_fed   = ""
+    catalysts_news  = ""
 
-    # --- 2. Macro & Fed ---
-    macro_and_fed = fetch_macro_and_fed()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_assets    = executor.submit(fetch_risk_assets)
+        future_macro     = executor.submit(fetch_macro_and_fed)
+        future_catalysts = executor.submit(fetch_catalysts_and_news)
 
-    # --- 3. Catalysts & news ---
-    catalysts_and_news = fetch_catalysts_and_news()
+        for future in as_completed([future_assets, future_macro, future_catalysts]):
+            if future is future_assets:
+                try:
+                    risk_assets = future.result()
+                except Exception as e:
+                    print(f"[market] Risk assets error: {e}")
 
-    print(f"[market_data] Collection complete for {symbol}")
+            elif future is future_macro:
+                try:
+                    macro_and_fed = future.result()
+                except Exception as e:
+                    print(f"[market] Macro error: {e}")
 
-    return {
-        "symbol":           symbol,
-        "timestamp":        timestamp,
-        "risk_assets":      risk_assets,       # Live prices: VIX, DXY, Gold, etc.
-        "macro_and_fed":    macro_and_fed,     # Perplexity: CPI, NFP, Fed policy
-        "catalysts_news":   catalysts_and_news # Perplexity: calendar, breaking news
+            elif future is future_catalysts:
+                try:
+                    catalysts_news = future.result()
+                except Exception as e:
+                    print(f"[market] Catalysts error: {e}")
+
+    raw_data = {
+        "timestamp":      timestamp,
+        "symbol":         symbol,
+        "risk_assets":    risk_assets,
+        "macro_and_fed":  macro_and_fed,
+        "catalysts_news": catalysts_news,
     }
+
+    # --- Step 2: Synthesize ---
+    intelligence = synthesize_market_data(raw_data)
+
+    # Attach timestamp so brain.py cache logic can check freshness
+    intelligence["_fetched_at"] = timestamp
+
+    print(f"[market] Market intelligence ready for {symbol}")
+    return intelligence
