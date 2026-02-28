@@ -8,7 +8,7 @@
 #property strict
 
 //--- Input parameters
-input string   ServerURL = "http://localhost:5000";  // BotCore API URL
+input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
 input int      SODHour = 7;                           // Start of Day hour (24h format)
 
@@ -997,15 +997,6 @@ bool ClosePosition(int ticket)
       Print("❌ Position close failed: ", result.retcode);
       return false;
    }
-}
-
-//+------------------------------------------------------------------+
-//| Update EA State                                                  |
-//+------------------------------------------------------------------+
-void UpdateState(EA_STATE newState)
-{
-   CurrentState = newState;
-   Print("State Updated: ", EnumToString(CurrentState));
 }
 
 //+------------------------------------------------------------------+
