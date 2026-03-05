@@ -10,7 +10,7 @@
 //--- Input parameters
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
-input int      SODHour = 7;                           // Start of Day hour (24h format)
+input string   SODTime = "07:00";                     // Start of Day time (HH:MM, 24h format)
 
 //--- EA State Enum
 enum EA_STATE
@@ -42,7 +42,7 @@ int OnInit()
    Print("BotCore EA v2.0 Initialized");
    Print("Server URL: ", ServerURL);
    Print("Trading Symbol: ", TradingSymbol);
-   Print("SOD Hour: ", SODHour, ":00");
+   Print("SOD Time: ", SODTime);
    Print("========================================");
    
    CurrentState = STATE_INIT;
@@ -80,8 +80,11 @@ void CheckSODTime()
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    
-   // Check if it's 7am and we haven't run SOD today
-   if(dt.hour == SODHour && dt.min == 0)
+   // Parse SODTime string (HH:MM)
+   int sodHour = (int)StringToInteger(StringSubstr(SODTime, 0, 2));
+   int sodMin  = (int)StringToInteger(StringSubstr(SODTime, 3, 2));
+   
+   if(dt.hour == sodHour && dt.min == sodMin)
    {
       datetime currentDay = StringToTime(IntegerToString(dt.year) + "." + 
                                           IntegerToString(dt.mon) + "." + 
@@ -90,7 +93,7 @@ void CheckSODTime()
       if(LastSODTime < currentDay)
       {
          Print("========================================");
-         Print("SOD Time Reached (", SODHour, ":00) - Running SOD Analysis");
+         Print("SOD Time Reached (", SODTime, ") - Running SOD Analysis");
          Print("========================================");
          
          RunSOD();
