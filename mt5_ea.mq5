@@ -1214,6 +1214,7 @@ string SendToAPI(string endpoint, string payload)
    
    string responseStr = CharArrayToString(result);
    Print("API Response received (", StringLen(responseStr), " bytes)");
+   Print("Response body: ", responseStr);
    
    return responseStr;
 }

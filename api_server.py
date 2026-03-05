@@ -123,6 +123,9 @@ def trading_sod():
         return jsonify(result), 200
         
     except Exception as e:
+        import traceback
+        print(f"[sod] ERROR: {e}")
+        print(traceback.format_exc())
         return jsonify({
             "error": f"Internal server error: {str(e)}"
         }), 500
@@ -184,6 +187,9 @@ def trading_intraday():
         return jsonify(result), 200
         
     except Exception as e:
+        import traceback
+        print(f"[intraday] ERROR: {e}")
+        print(traceback.format_exc())
         return jsonify({
             "error": f"Internal server error: {str(e)}"
         }), 500
