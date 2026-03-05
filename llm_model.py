@@ -43,6 +43,6 @@ def call_gpt(
             {"role": "user",   "content": user_prompt}
         ],
         max_tokens=max_tokens,
-        temperature=0.3
+        temperature=0.2
     )
     return response.choices[0].message.content
