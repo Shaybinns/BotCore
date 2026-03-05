@@ -73,7 +73,7 @@ def trading_sod():
     }
     """
     try:
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True)
         
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
@@ -148,7 +148,7 @@ def trading_intraday():
     Note: Timeframe keys can vary - send whichever timeframes are needed
     """
     try:
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True)
         
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
