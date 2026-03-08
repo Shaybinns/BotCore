@@ -110,10 +110,11 @@ bool ValidateStrategy()
 //+------------------------------------------------------------------+
 string GetFromAPI(string url)
 {
-   char result[];
+   char   requestBody[];   // empty — GET has no body
+   char   result[];
    string responseHeaders;
    
-   int res = WebRequest("GET", url, NULL, NULL, 10000, result, 0, result, responseHeaders);
+   int res = WebRequest("GET", url, NULL, NULL, 10000, requestBody, 0, result, responseHeaders);
    
    if(res == -1)
    {
