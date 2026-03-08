@@ -11,6 +11,7 @@
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
 input string   SODTime = "07:00";                     // Start of Day time (HH:MM, 24h format)
+input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
 
 //--- EA State Enum
 enum EA_STATE
@@ -43,7 +44,12 @@ int OnInit()
    Print("Server URL: ", ServerURL);
    Print("Trading Symbol: ", TradingSymbol);
    Print("SOD Time: ", SODTime);
+   Print("Strategy: ", StringLen(StrategyName) > 0 ? StrategyName : "(none)");
    Print("========================================");
+   
+   // Validate strategy against server before allowing EA to run
+   if(!ValidateStrategy())
+      return(INIT_FAILED);
    
    CurrentState = STATE_INIT;
    LastSODTime = 0;
@@ -58,6 +64,67 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    Print("BotCore EA deinitialized");
+}
+
+//+------------------------------------------------------------------+
+//| Validate StrategyName against the server at startup              |
+//+------------------------------------------------------------------+
+bool ValidateStrategy()
+{
+   Print("--- Strategy Validation ---");
+   
+   if(StringLen(StrategyName) == 0)
+   {
+      Print("ERROR: StrategyName is empty.");
+      Print("Set a valid strategy name in EA inputs (Tools -> EA Properties -> Inputs).");
+      Print("Use GET ", ServerURL, "/api/strategies to list available strategies.");
+      return false;
+   }
+   
+   string url = ServerURL + "/api/strategies/" + StrategyName;
+   string response = GetFromAPI(url);
+   
+   if(StringLen(response) == 0)
+   {
+      Print("ERROR: Could not reach server at ", ServerURL);
+      Print("Check ServerURL input and ensure the server is reachable.");
+      return false;
+   }
+   
+   // A 200 response contains "\"success\":true"
+   if(StringFind(response, "\"success\":true") >= 0)
+   {
+      Print("Strategy validated OK: '", StrategyName, "'");
+      return true;
+   }
+   
+   // Not found or other error
+   Print("ERROR: Strategy '", StrategyName, "' not found on server.");
+   Print("Use GET ", ServerURL, "/api/strategies to list available strategies.");
+   Print("Use POST ", ServerURL, "/api/strategies to create a new one.");
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| HTTP GET helper — returns response body or empty string on error |
+//+------------------------------------------------------------------+
+string GetFromAPI(string url)
+{
+   char result[];
+   string responseHeaders;
+   
+   int res = WebRequest("GET", url, NULL, NULL, 10000, result, 0, result, responseHeaders);
+   
+   if(res == -1)
+   {
+      int error = GetLastError();
+      Print("GetFromAPI error code: ", error);
+      if(error == 4060)
+         Print("URL not allowed — add '", ServerURL, "' to MT5 Tools -> Options -> Expert Advisors -> Allow WebRequest");
+      return "";
+   }
+   
+   return CharArrayToString(result);
 }
 
 //+------------------------------------------------------------------+
@@ -1012,6 +1079,9 @@ string PrepareSODOHLCData()
    // Add symbol
    json += "\"symbol\":\"" + TradingSymbol + "\",";
    
+   // Add strategy (empty string if not configured)
+   json += "\"strategy\":\"" + StrategyName + "\",";
+   
    // Get and add 1h DATA
    json += "\"1h_DATA\":";
    json += GetOHLCArray(TradingSymbol, PERIOD_H1, 200);
@@ -1050,6 +1120,9 @@ string PrepareIntradayOHLCData()
    
    // Add symbol
    json += "\"symbol\":\"" + TradingSymbol + "\",";
+   
+   // Add strategy (empty string if not configured)
+   json += "\"strategy\":\"" + StrategyName + "\",";
    
    // Parse monitoring timeframes and add data
    if(StringLen(MonitoringTimeframes) > 0)

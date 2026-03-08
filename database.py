@@ -1,11 +1,12 @@
 """
 Database Layer - PostgreSQL Integration
 
-4 tables:
+5 tables:
   analysis_notes    — AI analysis outputs (SOD, intraday, market data cache)
   current_positions — live MT5 positions, fully replaced on each EA update
   trade_events      — append-only audit log of EA execution confirmations
   users             — chat interface user accounts and message history
+  strategies        — named strategy prompts, selectable per EA instance
 """
 
 import psycopg2
@@ -87,10 +88,22 @@ def init_database():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS strategies (
+            id              SERIAL PRIMARY KEY,
+            strategy_name   VARCHAR(100) NOT NULL UNIQUE,
+            strategy_prompt TEXT         NOT NULL,
+            uploaded_by     VARCHAR(255) NOT NULL,
+            created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_notes_symbol ON analysis_notes(symbol, note_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_current_positions_symbol ON current_positions(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategies_name ON strategies(strategy_name)")
 
     conn.commit()
     cursor.close()
@@ -280,4 +293,109 @@ def save_trade_event(symbol: str, event_type: str, event_data: Dict[str, Any]) -
 
     except Exception as e:
         print(f"[db] save_trade_event error: {e}")
+        return False
+
+
+# =============================================================================
+# STRATEGIES
+# Named trading strategy prompts — selectable per EA instance.
+# One row per strategy_name; upserted on save (last write wins).
+# =============================================================================
+
+def save_strategy(strategy_name: str, strategy_prompt: str, uploaded_by: str) -> bool:
+    """
+    Upsert a strategy. If strategy_name already exists, the prompt and
+    uploaded_by are updated and updated_at is refreshed.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO strategies (strategy_name, strategy_prompt, uploaded_by, created_at, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (strategy_name) DO UPDATE SET
+                strategy_prompt = EXCLUDED.strategy_prompt,
+                uploaded_by     = EXCLUDED.uploaded_by,
+                updated_at      = CURRENT_TIMESTAMP
+        """, (strategy_name.strip(), strategy_prompt.strip(), uploaded_by.strip()))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] save_strategy error: {e}")
+        return False
+
+
+def get_strategy(strategy_name: str) -> Optional[Dict[str, Any]]:
+    """Return a single strategy by name, or None if not found."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT strategy_name, strategy_prompt, uploaded_by, created_at, updated_at
+            FROM strategies
+            WHERE strategy_name = %s
+        """, (strategy_name.strip(),))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not row:
+            return None
+
+        return {
+            "strategy_name":   row[0],
+            "strategy_prompt": row[1],
+            "uploaded_by":     row[2],
+            "created_at":      row[3].isoformat() if row[3] else None,
+            "updated_at":      row[4].isoformat() if row[4] else None,
+        }
+
+    except Exception as e:
+        print(f"[db] get_strategy error: {e}")
+        return None
+
+
+def list_strategies() -> List[Dict[str, Any]]:
+    """Return all strategies ordered by name (prompt text excluded for brevity)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT strategy_name, uploaded_by, created_at, updated_at
+            FROM strategies
+            ORDER BY strategy_name ASC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        return [{
+            "strategy_name": row[0],
+            "uploaded_by":   row[1],
+            "created_at":    row[2].isoformat() if row[2] else None,
+            "updated_at":    row[3].isoformat() if row[3] else None,
+        } for row in rows]
+
+    except Exception as e:
+        print(f"[db] list_strategies error: {e}")
+        return []
+
+
+def delete_strategy(strategy_name: str) -> bool:
+    """Delete a strategy by name."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM strategies WHERE strategy_name = %s", (strategy_name.strip(),))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return deleted
+
+    except Exception as e:
+        print(f"[db] delete_strategy error: {e}")
         return False

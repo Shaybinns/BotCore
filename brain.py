@@ -13,13 +13,14 @@ from typing import Dict, Any, List
 from ohlc_analyzer import analyze_ohlc_data
 from chart_analyzer import analyze_charts_with_gpt_vision
 from market_data import get_market_data
-from prompt import get_sod_prompt, get_intraday_prompt
+from prompt import compose_sod_prompt, compose_intraday_prompt
 from llm_model import call_gpt
 from database import (
     get_analysis_note,
     save_analysis_note,
     clear_analysis_notes,
-    get_current_positions
+    get_current_positions,
+    get_strategy,
 )
 
 # Market data is cached in the DB as 'market_data_note'.
@@ -65,13 +66,14 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
 def sod_action(
     symbol: str,
     ohlc_data: Dict[str, List[Dict[str, Any]]],
-    positions: List[Dict[str, Any]] = None  # DEPRECATED - now retrieved from DB
+    positions: List[Dict[str, Any]] = None,  # DEPRECATED - now retrieved from DB
+    strategy_name: str = None
 ) -> Dict[str, Any]:
     """
     Start of Day (SOD) action - comprehensive daily market analysis.
 
     Workflow:
-      0. Load DB positions + previous run note
+      0. Load DB positions + previous run note + strategy (if specified)
       1. OHLC analysis
       2. Market data  — fetched fresh every SOD and saved to DB (market_data_note)
       3. Chart visual analysis — GPT Vision sees only the chart images, no context
@@ -79,9 +81,10 @@ def sod_action(
       5. Persist result to DB (sod_note), clear yesterday's last_run_note
 
     Args:
-        symbol:    Trading symbol (e.g. "GBPUSD")
-        ohlc_data: {timeframe_key: [candle dicts], ...}
-        positions: DEPRECATED - positions now retrieved from database
+        symbol:        Trading symbol (e.g. "GBPUSD")
+        ohlc_data:     {timeframe_key: [candle dicts], ...}
+        positions:     DEPRECATED - positions now retrieved from database
+        strategy_name: Name of the strategy to load from DB (optional)
 
     Returns:
         Comprehensive SOD analysis as JSON dictionary
@@ -98,6 +101,15 @@ def sod_action(
     previous_run = get_analysis_note(symbol, 'last_run_note')
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print("[brain] Previous run note found" if previous_run else "[brain] No previous run note")
+
+    strategy_prompt_text = None
+    if strategy_name:
+        strategy = get_strategy(strategy_name)
+        if strategy:
+            strategy_prompt_text = strategy["strategy_prompt"]
+            print(f"[brain] Strategy loaded: '{strategy_name}'")
+        else:
+            print(f"[brain] WARNING: Strategy '{strategy_name}' not found in DB — proceeding without it")
 
     # ------------------------------------------------------------------
     # Step 1: Parallel data collection
@@ -209,8 +221,10 @@ def sod_action(
     # Step 3: Trading decision — GPT-4o with full assembled context
     # ------------------------------------------------------------------
     print("\n[brain] Step 3: Sending to GPT-4o for SOD trading decision...")
+    if strategy_name:
+        print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
-        sod_prompt    = get_sod_prompt()
+        sod_prompt    = compose_sod_prompt(strategy_prompt_text)
         response_text = call_gpt(system_prompt=sod_prompt, user_prompt=full_context)
         print(f"[brain] GPT-4o response received ({len(response_text)} chars)")
 
@@ -235,7 +249,8 @@ def sod_action(
             "analysis_timestamp": datetime.now(timezone.utc).isoformat(),
             "ohlc_timeframes_analyzed": list(ohlc_data.keys()),
             "chart_timeframes_analyzed": timeframes,
-            "previous_run_context_used": previous_run is not None
+            "previous_run_context_used": previous_run is not None,
+            "strategy_used": strategy_name if strategy_prompt_text else None
         }
 
         print("\n" + "=" * 60)
@@ -255,13 +270,14 @@ def sod_action(
 def intraday_action(
     symbol: str,
     ohlc_data: Dict[str, List[Dict[str, Any]]],
-    positions: List[Dict[str, Any]] = None  # DEPRECATED - now retrieved from DB
+    positions: List[Dict[str, Any]] = None,  # DEPRECATED - now retrieved from DB
+    strategy_name: str = None
 ) -> Dict[str, Any]:
     """
     Intraday action - active trading analysis during the day.
 
     Workflow:
-      0. Load DB positions + SOD note + last run note
+      0. Load DB positions + SOD note + last run note + strategy (if specified)
       1. OHLC analysis
       2. Market data  — loaded from DB cache (market_data_note saved by SOD).
                         Re-fetched only if cache is missing or older than MARKET_DATA_CACHE_HOURS.
@@ -270,9 +286,10 @@ def intraday_action(
       5. Persist result to DB (last_run_note)
 
     Args:
-        symbol:    Trading symbol (e.g. "GBPUSD")
-        ohlc_data: {timeframe_key: [candle dicts], ...}
-        positions: DEPRECATED - positions now retrieved from database
+        symbol:        Trading symbol (e.g. "GBPUSD")
+        ohlc_data:     {timeframe_key: [candle dicts], ...}
+        positions:     DEPRECATED - positions now retrieved from database
+        strategy_name: Name of the strategy to load from DB (optional)
 
     Returns:
         Intraday trading decision as JSON dictionary
@@ -290,6 +307,15 @@ def intraday_action(
     last_run_note = get_analysis_note(symbol, 'last_run_note')
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print(f"[brain] SOD note: {'found' if sod_note else 'missing'} | Last run: {'found' if last_run_note else 'missing'}")
+
+    strategy_prompt_text = None
+    if strategy_name:
+        strategy = get_strategy(strategy_name)
+        if strategy:
+            strategy_prompt_text = strategy["strategy_prompt"]
+            print(f"[brain] Strategy loaded: '{strategy_name}'")
+        else:
+            print(f"[brain] WARNING: Strategy '{strategy_name}' not found in DB — proceeding without it")
 
     timeframes = list(ohlc_data.keys())[:4] or ["H1", "M15"]
 
@@ -405,8 +431,10 @@ def intraday_action(
     # Step 3: Trading decision — GPT-4o with full assembled context
     # ------------------------------------------------------------------
     print("\n[brain] Step 3: Sending to GPT-4o for intraday trading decision...")
+    if strategy_name:
+        print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
-        intraday_prompt = get_intraday_prompt()
+        intraday_prompt = compose_intraday_prompt(strategy_prompt_text)
         response_text   = call_gpt(system_prompt=intraday_prompt, user_prompt=full_context)
         print(f"[brain] GPT-4o response received ({len(response_text)} chars)")
 
@@ -425,7 +453,8 @@ def intraday_action(
             "timeframes_analyzed": timeframes,
             "sod_context_used": sod_note is not None,
             "last_run_context_used": last_run_note is not None,
-            "market_data_from_cache": market_from_cache
+            "market_data_from_cache": market_from_cache,
+            "strategy_used": strategy_name if strategy_prompt_text else None
         }
 
         print("\n" + "=" * 60)

@@ -14,7 +14,14 @@ import os
 import json
 from dotenv import load_dotenv
 from brain import sod_action, intraday_action
-from database import store_current_positions, get_current_positions
+from database import (
+    store_current_positions,
+    get_current_positions,
+    save_strategy,
+    get_strategy,
+    list_strategies,
+    delete_strategy,
+)
 
 load_dotenv()
 
@@ -92,7 +99,27 @@ def trading_sod():
             return jsonify({
                 "error": "Missing required timeframe data: 1h_DATA, 4h_DATA, 1D_DATA, 1W_DATA"
             }), 400
-        
+
+        # Extract positions and strategy — strategy is REQUIRED
+        positions     = data.get("positions", [])
+        strategy_name = (data.get("strategy") or "").strip() or None
+
+        if not strategy_name:
+            return jsonify({
+                "error": "Missing required field: strategy. "
+                         "All analysis runs must be linked to a named strategy. "
+                         "Use GET /api/strategies to see available strategies, "
+                         "or POST /api/strategies to create a new one."
+            }), 400
+
+        strategy_record = get_strategy(strategy_name)
+        if not strategy_record:
+            return jsonify({
+                "error": f"Strategy '{strategy_name}' not found. "
+                         "Use GET /api/strategies to see available strategies, "
+                         "or POST /api/strategies to create a new one."
+            }), 400
+
         # Log the SOD data received
         print("=" * 50)
         print(f"📊 Start of Day Data Received")
@@ -101,8 +128,10 @@ def trading_sod():
         print(f"4h candles: {len(h4_data)}")
         print(f"1D candles: {len(d1_data)}")
         print(f"1W candles: {len(w1_data)}")
+        if strategy_name:
+            print(f"Strategy: {strategy_name}")
         print("=" * 50)
-        
+
         # Prepare OHLC data in format expected by sod_action
         ohlc_data = {
             "1h_DATA": h1_data,
@@ -110,13 +139,15 @@ def trading_sod():
             "1D_DATA": d1_data,
             "1W_DATA": w1_data
         }
-        
-        # Extract positions (optional)
-        positions = data.get("positions", [])
-        
+
         # Call sod_action in brain.py to perform comprehensive SOD analysis
         # This includes: OHLC analysis, chart analysis with GPT Vision, market data, and final GPT analysis
-        result = sod_action(symbol=symbol, ohlc_data=ohlc_data, positions=positions)
+        result = sod_action(
+            symbol=symbol,
+            ohlc_data=ohlc_data,
+            positions=positions,
+            strategy_name=strategy_name
+        )
         
         # Return the AI analysis result directly to the EA
         # The EA will receive the complete SOD analysis including decision, bias, and order_details
@@ -161,27 +192,51 @@ def trading_intraday():
         # Extract OHLC data (flexible timeframes)
         ohlc_data = {}
         for key, value in data.items():
-            if key != "symbol" and key != "positions" and key.endswith("_DATA"):
+            if key not in ("symbol", "positions", "strategy") and key.endswith("_DATA"):
                 ohlc_data[key] = value
-        
+
         if not ohlc_data:
             return jsonify({
                 "error": "No OHLC data provided. Include at least one timeframe (e.g., H1_DATA, M15_DATA)"
             }), 400
-        
-        # Extract positions (optional)
-        positions = data.get("positions", [])
-        
+
+        # Extract positions and strategy — strategy is REQUIRED
+        positions     = data.get("positions", [])
+        strategy_name = (data.get("strategy") or "").strip() or None
+
+        if not strategy_name:
+            return jsonify({
+                "error": "Missing required field: strategy. "
+                         "All analysis runs must be linked to a named strategy. "
+                         "Use GET /api/strategies to see available strategies, "
+                         "or POST /api/strategies to create a new one."
+            }), 400
+
+        strategy_record = get_strategy(strategy_name)
+        if not strategy_record:
+            return jsonify({
+                "error": f"Strategy '{strategy_name}' not found. "
+                         "Use GET /api/strategies to see available strategies, "
+                         "or POST /api/strategies to create a new one."
+            }), 400
+
         # Log the intraday request
         print("=" * 50)
         print(f"📈 Intraday Analysis Request Received")
         print(f"Symbol: {symbol}")
         print(f"Timeframes: {list(ohlc_data.keys())}")
         print(f"Positions: {len(positions)} open")
+        if strategy_name:
+            print(f"Strategy: {strategy_name}")
         print("=" * 50)
-        
+
         # Call intraday_action in brain.py
-        result = intraday_action(symbol=symbol, ohlc_data=ohlc_data, positions=positions)
+        result = intraday_action(
+            symbol=symbol,
+            ohlc_data=ohlc_data,
+            positions=positions,
+            strategy_name=strategy_name
+        )
         
         # Return the AI analysis result directly to the EA
         return jsonify(result), 200
@@ -376,6 +431,108 @@ def store_positions():
         }), 500
 
 
+# =============================================================================
+# STRATEGY ENDPOINTS
+# =============================================================================
+
+@app.route("/api/strategies", methods=["POST"])
+def strategies_create():
+    """
+    Create or update a named trading strategy.
+
+    Request JSON:
+      {
+        "strategy_name":   "Macro Liquidity Sweep",
+        "strategy_prompt": "Trade only during London session...",
+        "uploaded_by":     "john@example.com"
+      }
+
+    If strategy_name already exists the prompt and uploaded_by are updated.
+    Returns the saved strategy record (without the prompt text, use GET /<name> for that).
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        strategy_name   = (data.get("strategy_name")   or "").strip()
+        strategy_prompt = (data.get("strategy_prompt") or "").strip()
+        uploaded_by     = (data.get("uploaded_by")     or "").strip()
+
+        if not strategy_name:
+            return jsonify({"error": "Missing required field: strategy_name"}), 400
+        if not strategy_prompt:
+            return jsonify({"error": "Missing required field: strategy_prompt"}), 400
+        if not uploaded_by:
+            return jsonify({"error": "Missing required field: uploaded_by"}), 400
+
+        success = save_strategy(strategy_name, strategy_prompt, uploaded_by)
+        if not success:
+            return jsonify({"error": "Failed to save strategy"}), 500
+
+        saved = get_strategy(strategy_name)
+        return jsonify({
+            "success": True,
+            "strategy": {k: v for k, v in saved.items() if k != "strategy_prompt"}
+        }), 201
+
+    except Exception as e:
+        print(f"[strategies/create] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/strategies", methods=["GET"])
+def strategies_list():
+    """
+    List all strategies (name, uploaded_by, timestamps — no prompt text).
+
+    Returns:
+      { "success": true, "strategies": [...] }
+    """
+    try:
+        strategies = list_strategies()
+        return jsonify({"success": True, "strategies": strategies})
+    except Exception as e:
+        print(f"[strategies/list] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/strategies/<strategy_name>", methods=["GET"])
+def strategies_get(strategy_name: str):
+    """
+    Get a single strategy by name, including the full prompt text.
+
+    Returns:
+      { "success": true, "strategy": { strategy_name, strategy_prompt, uploaded_by, ... } }
+    """
+    try:
+        strategy = get_strategy(strategy_name)
+        if not strategy:
+            return jsonify({"error": f"Strategy '{strategy_name}' not found", "success": False}), 404
+        return jsonify({"success": True, "strategy": strategy})
+    except Exception as e:
+        print(f"[strategies/get] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/strategies/<strategy_name>", methods=["DELETE"])
+def strategies_delete(strategy_name: str):
+    """
+    Delete a strategy by name.
+
+    Returns:
+      { "success": true }  or 404 if not found.
+    """
+    try:
+        deleted = delete_strategy(strategy_name)
+        if not deleted:
+            return jsonify({"error": f"Strategy '{strategy_name}' not found", "success": False}), 404
+        return jsonify({"success": True, "message": f"Strategy '{strategy_name}' deleted"})
+    except Exception as e:
+        print(f"[strategies/delete] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({
@@ -387,7 +544,9 @@ def not_found(error):
             "/api/trading/snapshot",
             "/api/trading/execute",
             "/api/trading/status",
-            "/api/trading/store_positions"
+            "/api/trading/store_positions",
+            "/api/strategies",
+            "/api/strategies/<name>"
         ]
     }), 404
 
@@ -514,7 +673,7 @@ def chat():
             return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
 
         from openai import OpenAI
-        from prompt import get_botcore_prompt
+        from prompt import compose_botcore_prompt
 
         context = _build_chat_context(symbol, user_id)
         client  = OpenAI(api_key=openai_key)
@@ -522,7 +681,7 @@ def chat():
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": get_botcore_prompt()},
+                {"role": "system", "content": compose_botcore_prompt()},
                 {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
             ],
             max_tokens=2000,
@@ -590,13 +749,13 @@ def chat_stream():
             full_reply = []
             try:
                 from openai import OpenAI
-                from prompt import get_botcore_prompt
+                from prompt import compose_botcore_prompt
 
                 client = OpenAI(api_key=openai_key)
                 stream = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[
-                        {"role": "system", "content": get_botcore_prompt()},
+                        {"role": "system", "content": compose_botcore_prompt()},
                         {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
                     ],
                     max_tokens=2000,
@@ -811,8 +970,9 @@ if __name__ == "__main__":
     host = os.getenv('HOST', '0.0.0.0')
 
     print(f"Starting BotCore API on {host}:{port}")
-    print(f"Trading endpoints: http://{host}:{port}/api/trading/")
-    print(f"Chat endpoints:    http://{host}:{port}/api/chat")
-    print(f"Auth endpoints:    http://{host}:{port}/api/auth/")
+    print(f"Trading endpoints:  http://{host}:{port}/api/trading/")
+    print(f"Chat endpoints:     http://{host}:{port}/api/chat")
+    print(f"Auth endpoints:     http://{host}:{port}/api/auth/")
+    print(f"Strategy endpoints: http://{host}:{port}/api/strategies")
 
     app.run(host=host, port=port, debug=False)
