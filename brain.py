@@ -37,7 +37,7 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
     Stored under symbol="GLOBAL" — market intelligence is not symbol-specific
     (VIX, DXY, Fed policy, news apply to all pairs equally).
     """
-    cached = get_analysis_note('GLOBAL', 'market_data_note')
+    cached = get_analysis_note('GLOBAL', 'market_data_note', strategy_name='')
     if cached:
         created_at_str = cached.get('_db_created_at')
         if created_at_str:
@@ -57,10 +57,10 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
     else:
         print("[market] No market_data_note in DB — fetching fresh...")
 
-    data = get_market_data(symbol)
-    save_analysis_note('GLOBAL', 'market_data_note', data)
-    print("[market] Market data refreshed and saved to DB")
-    return data
+        data = get_market_data(symbol)
+        save_analysis_note('GLOBAL', 'market_data_note', data, strategy_name='')
+        print("[market] Market data refreshed and saved to DB")
+        return data
 
 
 def sod_action(
@@ -98,7 +98,7 @@ def sod_action(
     # ------------------------------------------------------------------
     print("\n[brain] Loading DB context...")
     db_positions = get_current_positions(symbol)
-    previous_run = get_analysis_note(symbol, 'last_run_note')
+    previous_run = get_analysis_note(symbol, 'last_run_note', strategy_name=strategy_name or '')
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print("[brain] Previous run note found" if previous_run else "[brain] No previous run note")
 
@@ -122,7 +122,7 @@ def sod_action(
 
     def _fetch_market_data_sod():
         data = get_market_data(symbol)
-        save_analysis_note('GLOBAL', 'market_data_note', data)
+        save_analysis_note('GLOBAL', 'market_data_note', data, strategy_name='')
         print("[market] Market data fetched and saved to DB (GLOBAL)")
         return data
 
@@ -232,14 +232,14 @@ def sod_action(
 
         print("[brain] Saving SOD analysis to database...")
         try:
-            save_analysis_note(symbol, 'sod_note', result)
+            save_analysis_note(symbol, 'sod_note', result, strategy_name=strategy_name or '')
             print("[brain] sod_note saved")
         except Exception as e:
             print(f"[brain] Error saving sod_note: {e}")
 
         print("[brain] Clearing last_run_note...")
         try:
-            clear_analysis_notes(symbol, ['last_run_note'])
+            clear_analysis_notes(symbol, ['last_run_note'], strategy_name=strategy_name or '')
             print("[brain] last_run_note cleared")
         except Exception as e:
             print(f"[brain] Error clearing last_run_note: {e}")
@@ -303,8 +303,8 @@ def intraday_action(
     # ------------------------------------------------------------------
     print("\n[brain] Loading DB context...")
     db_positions  = get_current_positions(symbol)
-    sod_note      = get_analysis_note(symbol, 'sod_note')
-    last_run_note = get_analysis_note(symbol, 'last_run_note')
+    sod_note      = get_analysis_note(symbol, 'sod_note',      strategy_name=strategy_name or '')
+    last_run_note = get_analysis_note(symbol, 'last_run_note', strategy_name=strategy_name or '')
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print(f"[brain] SOD note: {'found' if sod_note else 'missing'} | Last run: {'found' if last_run_note else 'missing'}")
 
@@ -442,7 +442,7 @@ def intraday_action(
 
         print("[brain] Saving intraday analysis to database...")
         try:
-            save_analysis_note(symbol, 'last_run_note', result)
+            save_analysis_note(symbol, 'last_run_note', result, strategy_name=strategy_name or '')
             print("[brain] last_run_note saved")
         except Exception as e:
             print(f"[brain] Error saving last_run_note: {e}")

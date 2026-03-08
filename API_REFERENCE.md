@@ -376,14 +376,16 @@ Send a message and receive the full response in one payload.
 **Request body**
 ```json
 {
-  "message": "What's the current market regime?",
-  "symbol":  "GBPUSD",
-  "user_id": "550e8400-e29b-41d4-a716-446655440000"
+  "message":  "What's the current market regime?",
+  "symbol":   "GBPUSD",
+  "user_id":  "550e8400-e29b-41d4-a716-446655440000",
+  "strategy": "London Liquidity Sweep"
 }
 ```
 
 - `symbol` — optional, defaults to `GBPUSD`
 - `user_id` — optional; enables per-user message history
+- `strategy` — optional; scopes the SOD and intraday context to a specific strategy. When provided, the assistant also receives the full strategy rules and can discuss them. If omitted, context is unscoped and the strategy section shows "None specified".
 
 **Success response** `200`
 ```json
@@ -405,9 +407,10 @@ Stream the response as newline-delimited JSON (NDJSON). Better for UI chat bubbl
 **Request body**
 ```json
 {
-  "message": "Walk me through today's trading plan",
-  "symbol":  "GBPUSD",
-  "user_id": "550e8400-e29b-41d4-a716-446655440000"
+  "message":  "Walk me through today's trading plan",
+  "symbol":   "GBPUSD",
+  "user_id":  "550e8400-e29b-41d4-a716-446655440000",
+  "strategy": "London Liquidity Sweep"
 }
 ```
 

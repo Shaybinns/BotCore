@@ -99,7 +99,41 @@ def init_database():
         )
     """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_notes_symbol ON analysis_notes(symbol, note_type)")
+    # ------------------------------------------------------------------
+    # analysis_notes migration: add strategy_name column and update the
+    # unique constraint from (symbol, note_type) to
+    # (symbol, note_type, strategy_name) so multiple strategies trading
+    # the same symbol don't overwrite each other's notes.
+    # These statements are safe to run on every boot (idempotent).
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        ALTER TABLE analysis_notes
+        ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(100) NOT NULL DEFAULT ''
+    """)
+
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'analysis_notes_symbol_note_type_key'
+            ) THEN
+                ALTER TABLE analysis_notes
+                DROP CONSTRAINT analysis_notes_symbol_note_type_key;
+            END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'analysis_notes_symbol_note_type_strategy_key'
+            ) THEN
+                ALTER TABLE analysis_notes
+                ADD CONSTRAINT analysis_notes_symbol_note_type_strategy_key
+                UNIQUE (symbol, note_type, strategy_name);
+            END IF;
+        END $$
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_notes_symbol ON analysis_notes(symbol, note_type, strategy_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_current_positions_symbol ON current_positions(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -113,23 +147,28 @@ def init_database():
 
 # =============================================================================
 # ANALYSIS NOTES
-# One row per (symbol, note_type). Always upserted — never accumulates.
+# One row per (symbol, note_type, strategy_name). Always upserted — never accumulates.
+# strategy_name='' is used for global/unscoped notes (e.g. market_data_note under GLOBAL).
 # note_type values in use:
-#   sod_note         — full SOD analysis result
-#   last_run_note    — most recent intraday result (cleared each SOD)
-#   market_data_note — market data cache (refreshed every ~4h by intraday)
+#   sod_note         — full SOD analysis result          (scoped to symbol + strategy)
+#   last_run_note    — most recent intraday result        (scoped to symbol + strategy)
+#   market_data_note — market data cache, stored under   (symbol='GLOBAL', strategy='')
 # =============================================================================
 
-def get_analysis_note(symbol: str, note_type: str) -> Optional[Dict[str, Any]]:
-    """Load a note. Returns the full_response dict with _db_created_at injected, or None."""
+def get_analysis_note(symbol: str, note_type: str, strategy_name: str = '') -> Optional[Dict[str, Any]]:
+    """
+    Load a note for the given (symbol, note_type, strategy_name).
+    Returns the full_response dict with _db_created_at injected, or None.
+    strategy_name defaults to '' for global notes (market_data_note).
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT full_response, created_at
             FROM analysis_notes
-            WHERE symbol = %s AND note_type = %s
-        """, (symbol, note_type))
+            WHERE symbol = %s AND note_type = %s AND strategy_name = %s
+        """, (symbol, note_type, strategy_name))
         result = cursor.fetchone()
         cursor.close()
         conn.close()
@@ -146,8 +185,12 @@ def get_analysis_note(symbol: str, note_type: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def save_analysis_note(symbol: str, note_type: str, full_response: Dict[str, Any]) -> bool:
-    """Upsert a note. Overwrites any existing row for this (symbol, note_type)."""
+def save_analysis_note(symbol: str, note_type: str, full_response: Dict[str, Any], strategy_name: str = '') -> bool:
+    """
+    Upsert a note for (symbol, note_type, strategy_name).
+    Overwrites any existing row for this combination.
+    strategy_name defaults to '' for global notes (market_data_note).
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -156,14 +199,15 @@ def save_analysis_note(symbol: str, note_type: str, full_response: Dict[str, Any
         key_points = full_response.get("decision", {}).get("key_points", [])
 
         cursor.execute("""
-            INSERT INTO analysis_notes (symbol, note_type, summary, key_points, full_response, created_at)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (symbol, note_type) DO UPDATE SET
+            INSERT INTO analysis_notes
+                (symbol, note_type, strategy_name, summary, key_points, full_response, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (symbol, note_type, strategy_name) DO UPDATE SET
                 summary       = EXCLUDED.summary,
                 key_points    = EXCLUDED.key_points,
                 full_response = EXCLUDED.full_response,
                 created_at    = CURRENT_TIMESTAMP
-        """, (symbol, note_type, summary, json.dumps(key_points), json.dumps(full_response)))
+        """, (symbol, note_type, strategy_name, summary, json.dumps(key_points), json.dumps(full_response)))
 
         conn.commit()
         cursor.close()
@@ -175,15 +219,19 @@ def save_analysis_note(symbol: str, note_type: str, full_response: Dict[str, Any
         return False
 
 
-def clear_analysis_notes(symbol: str, note_types: List[str]) -> bool:
-    """Delete specific note types for a symbol (e.g. clear last_run_note at SOD)."""
+def clear_analysis_notes(symbol: str, note_types: List[str], strategy_name: str = '') -> bool:
+    """
+    Delete specific note types for a (symbol, strategy_name) pair.
+    Used to clear last_run_note at the start of each SOD.
+    strategy_name defaults to '' for global/unscoped notes.
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         placeholders = ','.join(['%s'] * len(note_types))
         cursor.execute(
-            f"DELETE FROM analysis_notes WHERE symbol = %s AND note_type IN ({placeholders})",
-            [symbol] + note_types
+            f"DELETE FROM analysis_notes WHERE symbol = %s AND strategy_name = %s AND note_type IN ({placeholders})",
+            [symbol, strategy_name] + note_types
         )
         conn.commit()
         cursor.close()

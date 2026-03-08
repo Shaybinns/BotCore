@@ -558,28 +558,48 @@ def internal_error(error):
     }), 500
 
 
-def _build_chat_context(symbol: str, user_id: str = None) -> str:
+def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = None) -> str:
     """
     Load all available context from the DB and assemble it into a single
     context string for the chat assistant.
 
     Reads (never fetches live):
-      - market_data_note  — synthesized market intelligence
-      - sod_note          — today's SOD analysis and trading plan
-      - last_run_note     — most recent intraday analysis
+      - active strategy   — name + full prompt text (if strategy_name provided)
+      - market_data_note  — synthesized market intelligence (unscoped, global)
+      - sod_note          — today's SOD analysis, scoped to (symbol, strategy_name)
+      - last_run_note     — most recent intraday analysis, scoped to (symbol, strategy_name)
       - current_positions — live open positions
       - recent_messages   — user's conversation history (if user_id provided)
     """
-    from database import get_analysis_note, get_current_positions
+    from database import get_analysis_note, get_current_positions, get_strategy
     from datetime import datetime, timezone
+
+    scoped_strategy = strategy_name or ''
 
     parts = [
         f"CURRENT TIME: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"SYMBOL IN FOCUS: {symbol}",
+        f"ACTIVE STRATEGY: {strategy_name if strategy_name else 'None specified'}",
         ""
     ]
 
-    market_intel = get_analysis_note('GLOBAL', 'market_data_note')
+    # Strategy details — show name and full rules so the assistant can discuss them
+    if strategy_name:
+        strategy_record = get_strategy(strategy_name)
+        if strategy_record:
+            parts += [
+                f"=== ACTIVE STRATEGY: {strategy_name} ===",
+                f"Uploaded by: {strategy_record['uploaded_by']}",
+                "",
+                strategy_record["strategy_prompt"],
+                ""
+            ]
+        else:
+            parts += [f"=== ACTIVE STRATEGY ===", f"'{strategy_name}' — not found in database.", ""]
+    else:
+        parts += ["=== ACTIVE STRATEGY ===", "No strategy specified in this request.", ""]
+
+    market_intel = get_analysis_note('GLOBAL', 'market_data_note', strategy_name='')
     if market_intel:
         fetched_at = market_intel.get('_fetched_at') or market_intel.get('_db_created_at', 'unknown')
         parts += [
@@ -591,7 +611,7 @@ def _build_chat_context(symbol: str, user_id: str = None) -> str:
     else:
         parts += ["=== MARKET INTELLIGENCE ===", "Not yet available — SOD has not run today.", ""]
 
-    sod_note = get_analysis_note(symbol, 'sod_note')
+    sod_note = get_analysis_note(symbol, 'sod_note', strategy_name=scoped_strategy)
     if sod_note:
         parts += [
             "=== TODAY'S SOD ANALYSIS (trading plan and bias) ===",
@@ -600,9 +620,10 @@ def _build_chat_context(symbol: str, user_id: str = None) -> str:
             ""
         ]
     else:
-        parts += ["=== TODAY'S SOD ANALYSIS ===", "Not yet available — SOD has not run today.", ""]
+        label = f"for strategy '{strategy_name}'" if strategy_name else "— SOD has not run today"
+        parts += ["=== TODAY'S SOD ANALYSIS ===", f"Not yet available {label}.", ""]
 
-    last_run = get_analysis_note(symbol, 'last_run_note')
+    last_run = get_analysis_note(symbol, 'last_run_note', strategy_name=scoped_strategy)
     if last_run:
         parts += [
             "=== LAST INTRADAY ANALYSIS ===",
@@ -661,9 +682,10 @@ def chat():
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
-        message = data.get("message", "").strip()
-        symbol  = data.get("symbol", "GBPUSD").upper()
-        user_id = data.get("user_id")
+        message       = data.get("message", "").strip()
+        symbol        = data.get("symbol", "GBPUSD").upper()
+        user_id       = data.get("user_id")
+        strategy_name = (data.get("strategy") or "").strip() or None
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -675,7 +697,7 @@ def chat():
         from openai import OpenAI
         from prompt import compose_botcore_prompt
 
-        context = _build_chat_context(symbol, user_id)
+        context = _build_chat_context(symbol, user_id, strategy_name=strategy_name)
         client  = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
@@ -732,9 +754,10 @@ def chat_stream():
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
-        message = data.get("message", "").strip()
-        symbol  = data.get("symbol", "GBPUSD").upper()
-        user_id = data.get("user_id")
+        message       = data.get("message", "").strip()
+        symbol        = data.get("symbol", "GBPUSD").upper()
+        user_id       = data.get("user_id")
+        strategy_name = (data.get("strategy") or "").strip() or None
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -743,7 +766,7 @@ def chat_stream():
         if not openai_key:
             return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
 
-        context = _build_chat_context(symbol, user_id)
+        context = _build_chat_context(symbol, user_id, strategy_name=strategy_name)
 
         def generate():
             full_reply = []
