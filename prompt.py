@@ -482,63 +482,42 @@ While speaking to the user, if it seems like they are asking you to devise a new
 -Strategy template format below: 
 
 ================================================================
-STRATEGY PROMPT — AMR ASIAN RANGE BREAKOUT REVERSAL
-Version: 1.1
-Changes from 1.0:
-  - Added swing point definition and trust rule (Section 3)
-  - R:R updated from fixed to structure-adjusted (Section 6)
-  - SOD output clarified as direct EA instruction (Section 9)
-================================================================
-
+STRATEGY — LONDON RANGE ENTRY
 ----------------------------------------------------------------
+
 SECTION 1 — STRATEGY IDENTITY
 ----------------------------------------------------------------
 
-NAME: AMR Asian Range Breakout Reversal
+NAME: London Range Entry
 TYPE: Session range breakout with structural reversal entry
 DIRECTION: Both (long and short)
-INSTRUMENTS: All — instrument-specific parameters (lot step,
-             spread limits, point values) are handled by the EA.
+INSTRUMENTS: All — instrument-specific parameters (lot step, spread limits, point values) are handled by the EA.
 
-THEORY OF EDGE:
-Price frequently sweeps beyond the Asian session range to take
-liquidity before reversing. This strategy waits for that breakout
-to be confirmed by swing structure, then enters on the first sign
-of reversal — a lower swing low (for sells) or higher swing high
-(for buys) — using a limit order placed into the candle that
-created the reversal swing. The edge comes from fading the
-liquidity grab, not chasing the breakout.
-
+THEORY OF EDGE: Price frequently sweeps beyond the Asian session range to take liquidity before reversing. This strategy waits for that breakout to be confirmed by swing structure, then enters on the first sign of reversal — a lower swing low (for sells) or higher swing high (for buys) — using a limit order placed into the candle that created the reversal swing. The edge comes from fading the liquidity grab, not chasing the breakout.
 
 ----------------------------------------------------------------
 SECTION 2 — MARKET CONTEXT (PREREQUISITES)
 ----------------------------------------------------------------
 
-All of the following must be true before evaluating any setup.
-If any condition fails, the answer is NO TRADE — do not proceed.
+All of the following must be true before evaluating any setup. If any condition fails, the answer is NO TRADE — do not proceed.
 
 SESSION REFERENCE:
-- Asian session (approx 00:00–06:00 server time) defines the
-  daily range: the highest high and lowest low of that window.
-- A valid Asian high and Asian low must be identifiable for the
-  current day before any setup can be evaluated.
+- Asian session (00:00–06:00 server time) defines the daily range: the highest high and lowest low of that window.
+- A valid Asian high and Asian low must be identifiable for the current day before any setup can be evaluated.
 
 ACTIVE TRADING WINDOW:
-- Setups are only valid between 10:00 and 13:30 server time.
-- Do not evaluate or place orders outside this window.
-- No trades on Mondays or Fridays (day filters active).
+- Setups are only valid between 07:00 and 13:30 server time.
+- Do not evaluate or place orders outside this window
 
 DAILY TRADE LIMIT:
 - Maximum one trade per day, in any direction.
-- Once a trade has been placed today (pending or filled),
-  no further orders should be placed until the next day.
+- Once a trade has been placed today (pending or filled), no further orders should be placed until the next day.
 - Always note once a trade has been placed that day.
 
 OVERNIGHT POSITIONS:
 - The 21:00 hard close ensures nothing carries overnight.
 - All positions are closed at 21:00 without exception.
-- All daily tracking variables (swings, breakout flags, used
-  levels) reset at midnight.
+- All daily tracking variables (swings, breakout flags, used levels) reset at midnight.
 - There are no carry-over rules because carry-over never occurs.
 
 TIME-BASED ACTIONS (non-negotiable, always execute):
@@ -546,298 +525,258 @@ TIME-BASED ACTIONS (non-negotiable, always execute):
 - At 21:00: close all open positions for the day.
 - These actions override all other logic. They are not optional.
 
-
 ----------------------------------------------------------------
 SECTION 3 — SETUP CONDITIONS
 ----------------------------------------------------------------
 
-SWING POINT DEFINITION:
-A swing high is a candle whose high is higher than the highs of
-the candles immediately surrounding it — it is a local peak.
-A swing low is a candle whose low is lower than the lows of the
-candles immediately surrounding it — it is a local trough.
+SWING POINT DEFINITION: A swing high is a candle whose high is higher than the highs of the candles immediately surrounding it — it is a local peak. A swing low is a candle whose low is lower than the lows of the candles immediately surrounding it — it is a local trough.
 
-
-The swing values are identified by the ohlc.analyzer
-and fed to the AI as confirmed facts. The AI should understand
-this definition to reason about structure, but must trust and
-use the indicator values as given — do not attempt to
-independently recalculate or second-guess swing points.
+The swing values are identified by the ohlc_analyzer and fed to the AI as confirmed facts. The AI should understand this definition to reason about structure, but must trust and use the indicator values as given — do not attempt to independently recalculate or second-guess swing points.
 
 ---
 
-Evaluate sell and buy setups independently. Each has a two-step
-structural requirement plus timestamp ordering checks.
+Evaluate sell and buy setups independently. Each has a two-step structural requirement plus timestamp ordering checks.
 
 --- SELL SETUP ---
 
 Step 1 — Structural breakout (prerequisite):
-  A swing high must have formed ABOVE the Asian session high.
-  This confirms that price has swept liquidity above the range.
-  If no swing high exists above the Asian high → no sell setup.
+A swing high must have formed ABOVE the Asian session high.
+This confirms that price has swept liquidity above the range.
+If no swing high exists above the Asian high → no sell setup.
 
 Step 2 — Reversal confirmation:
-  A new swing low must form that satisfies ALL of the following:
-  a) It is LOWER than the previous swing low (lower low formed)
-  b) It occurred AFTER the most recent swing high in time
-     (last Swing Low Time > recent Swing High Time)
+A new swing low must form that satisfies ALL of the following:
+a) It is LOWER than the previous swing low (lower low formed)
+b) It occurred AFTER the most recent swing high in time (last Swing Low Time > recent Swing High Time)
 
 Extra timestamp condition:
-  The most recent swing high must have occurred AFTER the previous
-  swing low (recent Swing High Time > previous Swing Low Time).
-  If this ordering is violated, the setup is structurally invalid.
+The most recent swing high must have occurred AFTER the previous swing low (recent Swing High Time > previous Swing Low Time).
+If this ordering is violated, the setup is structurally invalid.
 
 Deduplication:
-  Once a swing high has been used to trigger a sell setup today,
-  it cannot be used again. If the same swing high value is
-  detected again, skip it — the setup has already been acted on.
+Once a swing high has been used to trigger a sell setup today, it cannot be used again. If the same swing high value is detected again, skip it — the setup has already been acted on.
 
 --- BUY SETUP ---
 
 Step 1 — Structural breakout (prerequisite):
-  A swing low must have formed BELOW the Asian session low.
-  This confirms that price has swept liquidity below the range.
-  If no swing low exists below the Asian low → no buy setup.
+A swing low must have formed BELOW the Asian session low.
+This confirms that price has swept liquidity below the range.
+If no swing low exists below the Asian low → no buy setup.
 
 Step 2 — Reversal confirmation:
-  A new swing high must form that satisfies ALL of the following:
-  a) It is HIGHER than the previous swing high (higher high formed)
-  b) It occurred AFTER the most recent swing low in time
-     (last Swing High Time > recent Swing Low Time)
+A new swing high must form that satisfies ALL of the following:
+a) It is HIGHER than the previous swing high (higher high formed)
+b) It occurred AFTER the most recent swing low in time (last Swing High Time > recent Swing Low Time)
 
 Extra timestamp condition:
-  The most recent swing low must have occurred AFTER the previous
-  swing high (recent Swing Low Time > previous Swing High Time).
-  If this ordering is violated, the setup is structurally invalid.
+The most recent swing low must have occurred AFTER the previous swing high (recent Swing Low Time > previous Swing High Time).
+If this ordering is violated, the setup is structurally invalid.
 
 Deduplication:
-  Once a swing low has been used to trigger a buy setup today,
-  it cannot be used again.
+Once a swing low has been used to trigger a buy setup today, it cannot be used again.
 
 --- DAILY SWING TRACKING ---
 
-The strategy tracks the highest swing high and lowest swing low
-seen since the daily breakout was confirmed:
-- After a breakout above the Asian high: track the highest
-  subsequent swing high seen that day (recentValidSwingHigh).
-- After a breakout below the Asian low: track the lowest
-  subsequent swing low seen that day (recentValidSwingLow).
+The strategy tracks the highest swing high and lowest swing low seen since the daily breakout was confirmed:
+- After a breakout above the Asian high: track the highest subsequent swing high seen that day (recentValidSwingHigh).
+- After a breakout below the Asian low: track the lowest subsequent swing low seen that day (recentValidSwingLow).
 - These extremes reset at midnight (start of new trading day).
-
 
 ----------------------------------------------------------------
 SECTION 4 — ENTRY RULES
 ----------------------------------------------------------------
 
-ORDER TYPE: Limit order only (BUY LIMIT or SELL LIMIT).
-            Never use market orders for entry.
+ORDER TYPE: Limit order only (BUY LIMIT or SELL LIMIT). Never use market orders for entry.
 
 ENTRY CANDLE:
-  For sells: use the candle that created the recentValidSwingHigh.
-  For buys:  use the candle that created the recentValidSwingLow.
-  Identify this candle by the timestamp of the swing point.
-  Do not use the most recent closed candle — use the swing candle.
+For sells: use the candle that created the recentValidSwingHigh.
+For buys: use the candle that created the recentValidSwingLow.
+Identify this candle by the timestamp of the swing point.
+Do not use the most recent closed candle — use the swing candle.
 
 ENTRY PRICE CALCULATION:
-  For a SELL LIMIT:
-    entry = candle_low + (candle_range × CandleEntryPercentage / 100)
-    Example at 50%: entry = midpoint of that candle
+For a SELL LIMIT:
+  entry = candle_low + (candle_range × CandleEntryPercentage / 100)
+  Example at 50%: entry = midpoint of that candle
 
-  For a BUY LIMIT:
-    entry = candle_high − (candle_range × CandleEntryPercentage / 100)
-    Example at 50%: entry = midpoint of that candle
+For a BUY LIMIT:
+  entry = candle_high − (candle_range × CandleEntryPercentage / 100)
+  Example at 50%: entry = midpoint of that candle
 
-  CandleEntryPercentage = 50
-
+CandleEntryPercentage = 50
 
 ORDER PLACEMENT:
-  Place the limit order with entry, SL, and TP pre-calculated.
-  After placing, mark the swing level as used for today.
-  Do not place if the daily trade limit has already been reached.
-
+Place the limit order with entry, SL, and TP pre-calculated.
+After placing, mark the swing level as used for today.
+Do not place if the daily trade limit has already been reached.
 
 ----------------------------------------------------------------
 SECTION 5 — STOP LOSS RULES
 ----------------------------------------------------------------
 
 PLACEMENT LOGIC:
-  The stop loss is placed beyond the candle that defined the
-  swing point — if price returns there, the setup is invalidated.
+The stop loss is placed beyond the candle that defined the swing point — if price returns there, the setup is invalidated.
 
-  For SELL trades:
-    SL = high of the swing high candle + InputStopLossBuffer points
+For SELL trades:
+  SL = high of the swing high candle + InputStopLossBuffer points
 
-  For BUY trades:
-    SL = low of the swing low candle − InputStopLossBuffer points
+For BUY trades:
+  SL = low of the swing low candle − InputStopLossBuffer points
 
-  InputStopLossBuffer = 20 points.
+InputStopLossBuffer = 20 points.
 
 SL DISTANCE:
-  After calculating SL, compute the distance in points:
-  - Sell: SL_distance = (SL − entry) / point_value
-  - Buy:  SL_distance = (entry − SL) / point_value
+After calculating SL, compute the distance in points:
+- Sell: SL_distance = (SL − entry) / point_value
+- Buy: SL_distance = (entry − SL) / point_value
 
-  This distance drives lot size calculation (Section 6).
-  Log the SL distance for every order placed.
+This distance drives lot size calculation (Section 6).
+Log the SL distance for every order placed.
 
 NEVER:
-  - Move the SL in a direction that increases risk.
-  - Place SL inside the candle range (must be beyond the extreme).
-
+- Move the SL in a direction that increases risk.
+- Place SL inside the candle range (must be beyond the extreme).
 
 ----------------------------------------------------------------
 SECTION 6 — TAKE PROFIT AND POSITION SIZING
 ----------------------------------------------------------------
 
 TAKE PROFIT — STRUCTURE-ADJUSTED:
-  TP is defaulted at 6R. The AI will assess the
-  nearest significant structural level in the direction of the
-  trade and compare this with the 6R TP limit, according to the 
-  market structure and daily bias the AI will decide whether to use
-  this structure level or the 6R set TP. Or if market structure is even
-  further it can decide based on the structure and bias to set it here. 
-  6R is the reference point, but the TP should never be below 3R.
+TP is defaulted at 6R. The AI will assess the nearest significant structural level in the direction of the trade and compare this with the 6R TP limit, according to the market structure and daily bias the AI will decide whether to use this structure level or the 6R set TP. Or if market structure is even further it can decide based on the structure and bias to set it here.
 
-  Structural levels to assess (in order of priority):
-  1. Prior session swing extreme (e.g. yesterday's high/low)
-  2. Asian session opposite extreme (Asian low for sells,
-     Asian high for buys)
-  3. Prominent round numbers or high-volume nodes if visible
+6R is the reference point, but the TP should never be below 3R.
 
-  PROCESS:
-  a) Calculate the mechanical 6R TP:
-       Sell TP = entry − (SL_distance × 6.0 × point_value)
-       Buy  TP = entry + (SL_distance × 6.0 × point_value)
-  b) Identify the nearest structural level beyond entry
-  c) If a structural level falls between entry and the 6R TP,
-     make the decision of where to put the TP between these bounds.
-  d) If the structural level is beyond 6R, use 6R or further between these bounds.
-  e) Always state in the note which TP was chosen and why,
-     including the R multiple it represents
+Structural levels to assess (in order of priority):
+1. Prior session swing extreme (e.g. yesterday's high/low)
+2. Asian session opposite extreme (Asian low for sells, Asian high for buys)
+3. Prominent round numbers or high-volume nodes if visible
 
-  MINIMUM TP: Never set TP closer than 3R. If the nearest
-  structural level is inside 3R, use 3R instead and flag it.
+PROCESS:
+a) Calculate the mechanical 6R TP:
+   Sell TP = entry − (SL_distance × 6.0 × point_value)
+   Buy  TP = entry + (SL_distance × 6.0 × point_value)
 
-  TP is fixed at order placement. Do not move TP after entry.
+b) Identify the nearest structural level beyond entry
+
+c) If a structural level falls between entry and the 6R TP, make the decision of where to put the TP between these bounds.
+
+d) If the structural level is beyond 6R, use 6R or further between these bounds.
+
+e) Always state in the note which TP was chosen and why, including the R multiple it represents.
+
+MINIMUM TP: Never set TP closer than 3R. If the nearest structural level is inside 3R, use 3R instead and flag it.
+
+TP is fixed at order placement. Do not move TP after entry.
 
 POSITION SIZING:
-  Lot size scales inversely with SL distance to maintain
-  consistent risk per trade:
+- If the market bias matches the direction of the trade setup, and points to the probability of the movement happening during the London session — then you can enter the trade with 1-2% risk.
+- IF the market bias is the opposite of the direction of the trade setup, and points to the probability of the movement happening during the London session — then you must enter the trade with 0.5% risk.
+- Any other instance, enter the trade with 1% risk.
 
-    lot_size = (100 / SL_distance_in_points) × InputBaseLotSize
+LOT SIZE CALCULATION:
+Lot size scales inversely with SL distance to maintain consistent risk per setup:
 
-  InputBaseLotSize represents the desired lot size when SL
-  distance is exactly 100 points. At a 50-point SL, lot size
-  doubles; at a 200-point SL, lot size halves.
+  lot_size = (100 / SL_distance_in_points) × InputBaseLotSize
 
-  After calculating:
-  - Round to nearest lot step (SYMBOL_VOLUME_STEP)
-  - Apply broker minimum volume (SYMBOL_VOLUME_MIN)
-  - Apply broker maximum volume (SYMBOL_VOLUME_MAX)
-  - Log the final lot size and SL distance for every order
+InputBaseLotSize represents the desired lot size when SL distance is exactly 100 points. At a 50-point SL, lot size doubles; at a 200-point SL, lot size halves.
 
+InputBaseLotSize = 0.1 lots, per 10k USD in trading account.
+If account is worth 100k USD, InputBaseLotSize = 1.0 lots.
+If account is worth 1k USD, InputBaseLotSize = 0.01 lots.
+Treat GBP accounts and USD accounts as 1GBP = 1.3USD.
+
+After calculating:
+- Round to nearest lot step (SYMBOL_VOLUME_STEP)
+- Apply broker minimum volume (SYMBOL_VOLUME_MIN)
+- Apply broker maximum volume (SYMBOL_VOLUME_MAX)
+- Log the final lot size and SL distance for every order.
 
 ----------------------------------------------------------------
 SECTION 7 — TRADE MANAGEMENT
 ----------------------------------------------------------------
 
 BREAKEVEN STOPLOSS:
-  Once the trade moves into profit of 1R, move the stoploss to 
-  breakeven, no matter what. Ignore all else and move the SL here. 
+Once the trade moves into profit of 1R, move the stoploss to breakeven, no matter what. Ignore all else and move the SL here.
 
 TRAILING STOP:
-  If the TP distance is more than 4R, incorporate the use of trailing stops. 
-  The trailing stop activates only once the trade is in profit of 2R,
-  it does not trail from the moment of entry.
-
-  Trigger threshold: Once trade is in profit of 2R, trail with this exact distance. 
-  So, trailingstop distance = 2R.
-
-  Check and update the trailing stop on every check once active.
+If the TP distance is more than 4R, incorporate the use of trailing stops.
+The trailing stop activates only once the trade is in profit of 2R; it does not trail from the moment of entry.
+Trigger threshold: Once trade is in profit of 2R, trail with this exact distance.
+So, trailingstop distance = 2R.
+Check and update the trailing stop on every check once active.
 
 TIME-BASED EXITS (mandatory, no exceptions):
-  - At 13:30: cancel any unfilled limit orders.
-  - At 21:00: close all open positions immediately.
-  These override trailing stop logic, R:R logic, and everything
-  else. They execute once per day and are not repeatable.
+- At 13:30: cancel any unfilled limit orders.
+- At 21:00: close all open positions immediately.
+These override trailing stop logic, R:R logic, and everything else. They execute once per day and are not repeatable.
 
 PERMITTED MODIFICATIONS:
-  - SL may be moved to break even and trailed as described above.
-  - TP is fixed — never modify after entry.
-  - No partial position closes in this strategy version.
-  - No scaling in or out.
+- SL may be moved to break even and trailed as described above.
+- TP is fixed — never modify after entry.
+- No partial position closes in this strategy version.
+- No scaling in or out.
 
 FORBIDDEN MODIFICATIONS:
-  - Never move SL to increase risk.
-  - Never move TP.
-  - Never add to a winning or losing position.
-
+- Never move SL to increase risk.
+- Never move TP.
+- Never add to a winning or losing position.
 
 ----------------------------------------------------------------
 SECTION 8 — INVALIDATION AND AI JUDGMENT
 ----------------------------------------------------------------
 
 DO NOT PLACE AN ORDER when any of the following are true:
-  - Outside the 10:00–13:30 trading window
-  - Daily trade limit already reached for today
-  - A position or pending order already exists (single-trade mode)
-  - The swing level being evaluated was already used today
-  - It is at or after 13:30 (orders would be removed immediately)
-  - Asian session range is not yet established for the day
-  - Timestamp ordering conditions in Section 3 are violated
+- Outside the 10:00–13:30 trading window
+- Daily trade limit already reached for today
+- A position or pending order already exists (single-trade mode)
+- The swing level being evaluated was already used today
+- It is at or after 13:30 (orders would be removed immediately)
+- Asian session range is not yet established for the day
+- Timestamp ordering conditions in Section 3 are violated
 
 CLOSE POSITIONS only if:
-  - The 21:00 time exit triggers (mandatory)
-  - The trailing stop is hit (EA-managed)
-  - The original SL is hit (EA-managed)
-  - TP is reached (EA-managed)
-  Do not close positions for any other reason. For the bottom 3,
-  this will be done automatically by the EA.
+- The 21:00 time exit triggers (mandatory)
+- The trailing stop is hit (EA-managed)
+- The original SL is hit (EA-managed)
+- TP is reached (EA-managed)
+
+Do not close positions for any other reason. For the bottom 3, this will be done automatically by the EA.
 
 AI JUDGMENT SCOPE:
-  Rules in this prompt are the primary decision authority.
-  The AI applies judgment only in these specific situations:
+Rules in this prompt are the primary decision authority.
+The AI applies judgment only in these specific situations:
 
-  1. Borderline conditions (e.g. swing high only 1–2 points above
-     Asian high): execute the rule as written, but flag the trade
-     in the analysis note as "low structural confidence" and
-     briefly explain why.
+1. Borderline conditions (e.g. swing high only 1–2 points above Asian high): execute the rule as written, but flag the trade in the analysis note as "low structural confidence" and briefly explain why.
 
-  2. Market context (e.g. high-impact news, extreme spread spike):
-     note the context in the analysis. Do not override rules —
-     surface the concern clearly so it can be reviewed.
+2. Market context (e.g. high-impact news, extreme spread spike): note the context in the analysis. Do not override rules — surface the concern clearly so it can be reviewed.
 
-  3. TP structural assessment (Section 6): the AI has active
-     discretion here. Always explain the choice.
+3. TP structural assessment (Section 6): the AI has active discretion here. Always explain the choice.
 
-  4. Ambiguous indicator data (e.g. swing timestamp unclear):
-     default to NO TRADE and explain what was missing.
+4. Ambiguous indicator data (e.g. swing timestamp unclear): default to NO TRADE and explain what was missing.
 
-  DEFAULT WHEN UNCERTAIN: Do nothing. A missed trade is always
-  preferable to a trade placed on incorrect reasoning.
-  State clearly in the note: what condition was not met and why.
+DEFAULT WHEN UNCERTAIN: Do nothing. A missed trade is always preferable to a trade placed on incorrect reasoning.
+State clearly in the note: what condition was not met and why.
 
 CONFIDENCE FLAGGING:
-  Every SOD and intraday note must include a confidence level:
-  - HIGH:     all conditions clearly met, no edge cases
-  - MEDIUM:   conditions met but one borderline factor noted
-  - LOW:      conditions marginally met or data quality concern
-  - NO TRADE: conditions not met — state which failed and why
-
+Every SOD and intraday note must include a confidence level:
+- HIGH: all conditions clearly met, no edge cases
+- MEDIUM: conditions met but one borderline factor noted
+- LOW: conditions marginally met or data quality concern
+- NO TRADE: conditions not met — state which failed and why
 
 ----------------------------------------------------------------
 SECTION 9 — REMINDER
 ----------------------------------------------------------------
 
 REASONING FIELD MUST COVER IN ORDER:
-  1. Asian range established? (high and low values)
-  2. Breakout above/below range? (which direction, which level)
-  3. Step 1 met? (swing beyond range — yes/no, values)
-  4. Step 2 met? (reversal confirmation — yes/no, values)
-  5. Timestamp ordering valid? (yes/no)
-  6. All prerequisite filters passed? (window, spread, day, etc.)
-  7. TP assessment (structural vs mechanical, R multiple)
-  8. Final decision and why
+1. Asian range established? (high and low values)
+2. Breakout above/below range? (which direction, which level)
+3. Step 1 met? (swing beyond range — yes/no, values)
+4. Step 2 met? (reversal confirmation — yes/no, values)
+5. Timestamp ordering valid? (yes/no)
+6. All prerequisite filters passed? (window, spread, day, etc.)
+7. TP assessment (structural vs mechanical, R multiple)
+8. Final decision and why
 
 ================================================================
 END OF STRATEGY PROMPT

@@ -200,7 +200,7 @@ def _detect_fvg(
 # Sessions: (label, start_hour_utc, end_hour_utc) — end is exclusive
 _SESSIONS = [
     ("00:00-06:00", 0, 6),
-    ("08:00-12:00", 8, 12),
+    ("07:00-12:00", 7, 12),
     ("13:00-17:00", 13, 17),
 ]
 
