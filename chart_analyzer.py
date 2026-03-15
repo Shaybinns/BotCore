@@ -59,7 +59,6 @@ ANALYZE EACH CHART FOR:
 1. TREND & STRUCTURE:
    - Overall trend direction (uptrend, downtrend, sideways/ranging)
    - Market structure sequence: Higher Highs (HH), Higher Lows (HL), Lower Highs (LH), Lower Lows (LL)
-   - Visible trendlines or channels
    - Recent breaks of structure (BOS) — where price broke through a prior swing high/low
 
 2. KEY PRICE LEVELS (use exact prices where readable on the chart):
@@ -69,13 +68,14 @@ ANALYZE EACH CHART FOR:
    - Areas of price congestion or consolidation
 
 3. CANDLESTICK PATTERNS & PRICE ACTION:
-   - Notable recent candle formations (engulfing, pin bars, doji, inside bars, etc.)
+   - Note areas of imbalance, where candle n and candle n+2 do not overlap, leaving a price gap (imbalance).
+   - Note very strong levels, where price has reacted to a level multiple times.
+   - Note areas within a trend where there are levels of imbalance that are still not filled. 
    - Strong wick rejections at levels
-   - Consolidation patterns (triangles, flags, rectangles, wedges)
 
 4. FAIR VALUE GAPS (FVG) / IMBALANCES:
    - 3-candle patterns where the middle candle creates a gap not covered by the first and third candle wicks
-   - Note approximate price range of any visible FVGs
+   - Note approximate price range of any visible FVGs. FVGs formed where a high or low is broken and once price comes back to this level, an imbalance candle is formed around this level, with one of the 3 candles closing above or below this level.
    - Whether price has returned to fill them or they remain open
 
 5. LIQUIDITY ZONES:
