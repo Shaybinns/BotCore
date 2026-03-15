@@ -21,11 +21,37 @@ from database import (
     clear_analysis_notes,
     get_current_positions,
     get_strategy,
+    get_account_context_for_analysis,
 )
 
 # Market data is cached in the DB as 'market_data_note'.
 # Intraday runs re-use it if fresher than this threshold.
 MARKET_DATA_CACHE_HOURS = 4
+
+
+def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
+    """Append account summary and snapshot history to context for the AI."""
+    lines = [
+        "=== ACCOUNT ===",
+        "account_size: " + (str(account_ctx.get("account_size")) if account_ctx.get("account_size") is not None else "—"),
+        "realised_pnl: " + (str(account_ctx.get("realised_pnl")) if account_ctx.get("realised_pnl") is not None else "—"),
+        "today_realised_pnl: " + (str(account_ctx.get("today_realised_pnl")) if account_ctx.get("today_realised_pnl") is not None else "—"),
+        "unrealised_pnl: " + (str(account_ctx.get("unrealised_pnl")) if account_ctx.get("unrealised_pnl") is not None else "—"),
+        "week_pnl: " + (str(account_ctx.get("week_pnl")) if account_ctx.get("week_pnl") is not None else "—"),
+        "month_pnl: " + (str(account_ctx.get("month_pnl")) if account_ctx.get("month_pnl") is not None else "—"),
+        "",
+    ]
+    first_10 = account_ctx.get("first_10") or []
+    last_10 = account_ctx.get("last_10") or []
+    if first_10:
+        lines.append("Account history (first 10 snapshots):")
+        lines.append(json.dumps(first_10, indent=2))
+        lines.append("")
+    if last_10:
+        lines.append("Account history (last 10 snapshots):")
+        lines.append(json.dumps(last_10, indent=2))
+        lines.append("")
+    context_parts.extend(lines)
 
 
 def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
@@ -203,6 +229,10 @@ def sod_action(
             json.dumps(positions, indent=2),
             ""
         ])
+
+    # Account context (summary + first/last 10 snapshots)
+    account_ctx = get_account_context_for_analysis(symbol, strategy_name or '')
+    _append_account_context(context_parts, account_ctx)
 
     context_parts.extend([
         "=== OHLC DATA ANALYSIS ===",
@@ -413,6 +443,10 @@ def intraday_action(
             json.dumps(positions, indent=2),
             ""
         ])
+
+    # Account context (summary + first/last 10 snapshots)
+    account_ctx = get_account_context_for_analysis(symbol, strategy_name or '')
+    _append_account_context(context_parts, account_ctx)
 
     context_parts.extend([
         "=== OHLC DATA ANALYSIS ===",

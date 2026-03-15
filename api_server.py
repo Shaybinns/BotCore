@@ -21,6 +21,7 @@ from database import (
     get_strategy,
     list_strategies,
     delete_strategy,
+    save_account_snapshot,
 )
 
 load_dotenv()
@@ -29,6 +30,16 @@ app = Flask(__name__)
 CORS(app)
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'botcore-secret-key-change-in-production')
+
+
+def _float_or_none(v):
+    """Return float(v) or None for optional numeric request fields."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 @app.route("/api/health", methods=["GET"])
@@ -119,6 +130,18 @@ def trading_sod():
                          "Use GET /api/strategies to see available strategies, "
                          "or POST /api/strategies to create a new one."
             }), 400
+
+        # Save account snapshot if account data provided
+        save_account_snapshot(
+            symbol=symbol,
+            strategy_name=strategy_name,
+            account_size=_float_or_none(data.get("account_size")),
+            realised_pnl=_float_or_none(data.get("realised_pnl")),
+            unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
+            today_realised_pnl=_float_or_none(data.get("today_realised_pnl")),
+            week_pnl=_float_or_none(data.get("week_pnl")),
+            month_pnl=_float_or_none(data.get("month_pnl")),
+        )
 
         # Log the SOD data received
         print("=" * 50)
@@ -219,6 +242,18 @@ def trading_intraday():
                          "Use GET /api/strategies to see available strategies, "
                          "or POST /api/strategies to create a new one."
             }), 400
+
+        # Save account snapshot if account data provided
+        save_account_snapshot(
+            symbol=symbol,
+            strategy_name=strategy_name,
+            account_size=_float_or_none(data.get("account_size")),
+            realised_pnl=_float_or_none(data.get("realised_pnl")),
+            unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
+            today_realised_pnl=_float_or_none(data.get("today_realised_pnl")),
+            week_pnl=_float_or_none(data.get("week_pnl")),
+            month_pnl=_float_or_none(data.get("month_pnl")),
+        )
 
         # Log the intraday request
         print("=" * 50)
@@ -571,7 +606,7 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
       - current_positions — live open positions
       - recent_messages   — user's conversation history (if user_id provided)
     """
-    from database import get_analysis_note, get_current_positions, get_strategy
+    from database import get_analysis_note, get_current_positions, get_strategy, get_account_context_for_analysis
     from datetime import datetime, timezone
 
     scoped_strategy = strategy_name or ''
@@ -582,6 +617,22 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
         f"ACTIVE STRATEGY: {strategy_name if strategy_name else 'None specified'}",
         ""
     ]
+
+    # Latest account snapshot (balance, PnL) for this symbol/strategy
+    account_ctx = get_account_context_for_analysis(symbol, scoped_strategy)
+    if any(account_ctx.get(k) is not None for k in ("account_size", "realised_pnl", "unrealised_pnl", "today_realised_pnl", "week_pnl", "month_pnl")):
+        parts += [
+            "=== ACCOUNT (latest snapshot) ===",
+            "account_size: " + (str(account_ctx.get("account_size")) if account_ctx.get("account_size") is not None else "—"),
+            "realised_pnl: " + (str(account_ctx.get("realised_pnl")) if account_ctx.get("realised_pnl") is not None else "—"),
+            "today_realised_pnl: " + (str(account_ctx.get("today_realised_pnl")) if account_ctx.get("today_realised_pnl") is not None else "—"),
+            "unrealised_pnl: " + (str(account_ctx.get("unrealised_pnl")) if account_ctx.get("unrealised_pnl") is not None else "—"),
+            "week_pnl: " + (str(account_ctx.get("week_pnl")) if account_ctx.get("week_pnl") is not None else "—"),
+            "month_pnl: " + (str(account_ctx.get("month_pnl")) if account_ctx.get("month_pnl") is not None else "—"),
+            ""
+        ]
+    else:
+        parts += ["=== ACCOUNT ===", "No account snapshots yet for this symbol/strategy.", ""]
 
     # Strategy details — show name and full rules so the assistant can discuss them
     if strategy_name:

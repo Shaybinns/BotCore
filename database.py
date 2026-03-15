@@ -1,12 +1,13 @@
 """
 Database Layer - PostgreSQL Integration
 
-5 tables:
+6 tables:
   analysis_notes    — AI analysis outputs (SOD, intraday, market data cache)
   current_positions — live MT5 positions, fully replaced on each EA update
   trade_events      — append-only audit log of EA execution confirmations
   users             — chat interface user accounts and message history
   strategies        — named strategy prompts, selectable per EA instance
+  account_snapshots — per-run account metrics (balance, PnL) for AI context
 """
 
 import psycopg2
@@ -132,6 +133,22 @@ def init_database():
             END IF;
         END $$
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS account_snapshots (
+            id                   SERIAL PRIMARY KEY,
+            symbol               VARCHAR(20)  NOT NULL,
+            strategy_name        VARCHAR(100) NOT NULL DEFAULT '',
+            created_at           TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            account_size         DECIMAL(18, 2),
+            realised_pnl         DECIMAL(18, 2),
+            unrealised_pnl       DECIMAL(18, 2),
+            today_realised_pnl   DECIMAL(18, 2),
+            week_pnl             DECIMAL(18, 2),
+            month_pnl            DECIMAL(18, 2)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_snapshots_symbol_strategy_created ON account_snapshots(symbol, strategy_name, created_at DESC)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_notes_symbol ON analysis_notes(symbol, note_type, strategy_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_current_positions_symbol ON current_positions(symbol)")
@@ -447,3 +464,122 @@ def delete_strategy(strategy_name: str) -> bool:
     except Exception as e:
         print(f"[db] delete_strategy error: {e}")
         return False
+
+
+# =============================================================================
+# ACCOUNT SNAPSHOTS
+# One row per SOD/intraday run. Used to build account context for the AI
+# (summary + first 10 and last 10 snapshots). All PnL values can be null.
+# =============================================================================
+
+def save_account_snapshot(
+    symbol: str,
+    strategy_name: str,
+    account_size: Optional[float] = None,
+    realised_pnl: Optional[float] = None,
+    unrealised_pnl: Optional[float] = None,
+    today_realised_pnl: Optional[float] = None,
+    week_pnl: Optional[float] = None,
+    month_pnl: Optional[float] = None,
+) -> bool:
+    """Append one account snapshot for this run (symbol + strategy)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO account_snapshots
+            (symbol, strategy_name, account_size, realised_pnl, unrealised_pnl,
+             today_realised_pnl, week_pnl, month_pnl)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            symbol,
+            strategy_name or '',
+            account_size,
+            realised_pnl,
+            unrealised_pnl,
+            today_realised_pnl,
+            week_pnl,
+            month_pnl,
+        ))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[db] save_account_snapshot error: {e}")
+        return False
+
+
+def get_account_context_for_analysis(symbol: str, strategy_name: str) -> Dict[str, Any]:
+    """
+    Return account context for the AI: latest summary plus first 10 and last 10
+    snapshots (by created_at). Used when building SOD/intraday context.
+    """
+    result = {
+        "account_size": None,
+        "realised_pnl": None,
+        "unrealised_pnl": None,
+        "today_realised_pnl": None,
+        "week_pnl": None,
+        "month_pnl": None,
+        "first_10": [],
+        "last_10": [],
+    }
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        scoped_strategy = strategy_name or ''
+
+        # Latest snapshot for summary
+        cursor.execute("""
+            SELECT account_size, realised_pnl, unrealised_pnl,
+                   today_realised_pnl, week_pnl, month_pnl, created_at
+            FROM account_snapshots
+            WHERE symbol = %s AND strategy_name = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (symbol, scoped_strategy))
+        row = cursor.fetchone()
+        if row:
+            result["account_size"] = float(row[0]) if row[0] is not None else None
+            result["realised_pnl"] = float(row[1]) if row[1] is not None else None
+            result["unrealised_pnl"] = float(row[2]) if row[2] is not None else None
+            result["today_realised_pnl"] = float(row[3]) if row[3] is not None else None
+            result["week_pnl"] = float(row[4]) if row[4] is not None else None
+            result["month_pnl"] = float(row[5]) if row[5] is not None else None
+
+        # First 10 (oldest) and last 10 (newest) snapshots — two separate queries to avoid duplicates
+        def row_to_dict(r):
+            return {
+                "account_size": float(r[0]) if r[0] is not None else None,
+                "realised_pnl": float(r[1]) if r[1] is not None else None,
+                "unrealised_pnl": float(r[2]) if r[2] is not None else None,
+                "today_realised_pnl": float(r[3]) if r[3] is not None else None,
+                "week_pnl": float(r[4]) if r[4] is not None else None,
+                "month_pnl": float(r[5]) if r[5] is not None else None,
+                "created_at": r[6].isoformat() if r[6] else None,
+            }
+        cursor.execute("""
+            SELECT account_size, realised_pnl, unrealised_pnl,
+                   today_realised_pnl, week_pnl, month_pnl, created_at
+            FROM account_snapshots
+            WHERE symbol = %s AND strategy_name = %s
+            ORDER BY created_at ASC
+            LIMIT 10
+        """, (symbol, scoped_strategy))
+        result["first_10"] = [row_to_dict(r) for r in cursor.fetchall()]
+        cursor.execute("""
+            SELECT account_size, realised_pnl, unrealised_pnl,
+                   today_realised_pnl, week_pnl, month_pnl, created_at
+            FROM account_snapshots
+            WHERE symbol = %s AND strategy_name = %s
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, (symbol, scoped_strategy))
+        result["last_10"] = [row_to_dict(r) for r in cursor.fetchall()]
+
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[db] get_account_context_for_analysis error: {e}")
+    return result

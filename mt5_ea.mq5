@@ -12,6 +12,7 @@ input string   ServerURL = "https://botcore-production.up.railway.app";  // BotC
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
 input string   SODTime = "07:00";                     // Start of Day time (HH:MM, 24h format)
 input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
+input double   InitialAccountSize = 0;                // Initial balance for realised PnL (0 = use current balance only, no realised sent)
 
 //--- EA State Enum
 enum EA_STATE
@@ -1071,6 +1072,28 @@ bool ClosePosition(int ticket)
 }
 
 //+------------------------------------------------------------------+
+//| Sum realised PnL from deal history in [from, to] (server time)   |
+//+------------------------------------------------------------------+
+double GetRealisedPnLInRange(datetime fromTime, datetime toTime)
+{
+   if(!HistorySelect(fromTime, toTime))
+      return 0;
+   double sum = 0;
+   int total = HistoryDealsTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+         continue;  // only count exit deals (close) for realised PnL
+      sum += HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      sum += HistoryDealGetDouble(ticket, DEAL_SWAP);
+      sum += HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+   }
+   return sum;
+}
+
+//+------------------------------------------------------------------+
 //| Prepare Start of Day OHLC data with positions                    |
 //+------------------------------------------------------------------+
 string PrepareSODOHLCData()
@@ -1082,6 +1105,18 @@ string PrepareSODOHLCData()
    
    // Add strategy (empty string if not configured)
    json += "\"strategy\":\"" + StrategyName + "\",";
+   
+   // Account details for AI context (balance, PnL)
+   datetime now = TimeCurrent();
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double unrealised = AccountInfoDouble(ACCOUNT_EQUITY) - balance;
+   double realisedCum = (InitialAccountSize > 0) ? (balance - InitialAccountSize) : 0;
+   json += "\"account_size\":" + DoubleToString(balance, 2) + ",";
+   json += "\"realised_pnl\":" + DoubleToString(realisedCum, 2) + ",";
+   json += "\"unrealised_pnl\":" + DoubleToString(unrealised, 2) + ",";
+   json += "\"today_realised_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 86400, now), 2) + ",";
+   json += "\"week_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 7*86400, now), 2) + ",";
+   json += "\"month_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 30*86400, now), 2) + ",";
    
    // Get and add 1h DATA
    json += "\"1h_DATA\":";
@@ -1124,6 +1159,18 @@ string PrepareIntradayOHLCData()
    
    // Add strategy (empty string if not configured)
    json += "\"strategy\":\"" + StrategyName + "\",";
+   
+   // Account details for AI context (balance, PnL)
+   datetime now = TimeCurrent();
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double unrealised = AccountInfoDouble(ACCOUNT_EQUITY) - balance;
+   double realisedCum = (InitialAccountSize > 0) ? (balance - InitialAccountSize) : 0;
+   json += "\"account_size\":" + DoubleToString(balance, 2) + ",";
+   json += "\"realised_pnl\":" + DoubleToString(realisedCum, 2) + ",";
+   json += "\"unrealised_pnl\":" + DoubleToString(unrealised, 2) + ",";
+   json += "\"today_realised_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 86400, now), 2) + ",";
+   json += "\"week_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 7*86400, now), 2) + ",";
+   json += "\"month_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 30*86400, now), 2) + ",";
    
    // Parse monitoring timeframes and add data
    if(StringLen(MonitoringTimeframes) > 0)
