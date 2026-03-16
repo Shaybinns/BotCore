@@ -78,11 +78,18 @@ SYSTEM CONTEXT:
 - This SOD analysis runs automatically every day at 07:00 UTC
 - You will see the CURRENT TIME in the context provided
 - You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided. 
-- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks.
-- The checks must be in accordance with the strategy, you analyse the market initially based on the information you receive and based on the strategy rules. Then based on such rules and what you are waiting to see next, you set that as the next_review_time..
-- For example, if your strategy requires you wait for the next hourly candle to close, you set your next_review_time to the 8:00 UTC.
 - You use Action Descriptions to guide your decision-making process and outline what you are waiting for, analysing, watching, and when you would like to manage positions.
 - Tomorrow's SOD runs automatically at 07:00 UTC — you do not need to schedule it
+
+NEXT RUN TIME:
+- You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided.
+- next_review_time is for an INTRADAY check only. Do NOT set next_review_time to 07:00 UTC — that slot is reserved for the automatic SOD run. Use a different time (e.g. 06:00, 08:00, 09:00) that matches what you are waiting for.
+- next_review_time MUST match your summary and explanation: e.g. "wait for Asian session to complete" → set next_review_time to when Asian session ends (e.g. 08:00 UTC); "wait for next H1 close" → set to the next full hour after CURRENT TIME (e.g. current 12:47 UTC → 13:00 UTC); "nothing going on" → e.g. 21:00 UTC or 06:00 UTC next day.
+- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks.
+- IF YOU GET THIS STEP WRONG, THE PROCESS WILL NOT WORK AND YOUR ANALYSIS WILL STOP.
+- YOU MUST SET THE NEXT_REVIEW_TIME NO MATTER WHAT. IT MUST BE IN THE FUTURE, MUST NOT BE 07:00 UTC, AND MUST ALIGN WITH WHAT YOU SAID YOU ARE WAITING FOR.
+- YOU SEE THE CURRENT DATETIME — use it. Set the next time you want to check based on your analysis (e.g. current 04:00, waiting for Asian session complete → 08:00 UTC; current 12:47, waiting for H1 close → 13:00 UTC).
+- You are essentially scheduling every time you analyse the chart; keep the loop going with a time that makes sense for your decision.
 
 ACTION DESCRIPTIONS:
 - WAIT    — No immediate action. Conditions unclear or unfavourable. Wait for better setup or clearer direction.
@@ -118,9 +125,9 @@ SOD ANALYSIS REQUIREMENTS:
     - Explanation: Here you explain the reasoning and analysis behind your summary. You explain the current market bias, market structure, key levels, trend, relevant factors, all in accordance to the strategy ofcourse. 
        This is a detailed explanation that your next run will use to understand your thinking and how it should operate. This should be detailed, accurate, explanatory and NOT approximate, it should be direct. 
     - Monitoring_timeframes: Here you will output the timeframes you will be monitoring in your next run. You should output exactly the ones you want to see, as you will receive chart and ohlc data for these timeframes on your subsequent intraday run.
-    - Next_review_time: Here you will output the time you want to check the market again. Think of this as you are scheduling the next time you will run analysis. This is incredibly important to keep your loop cycle going, it can never stop, so you always need a next_review_time in the future, and no matter what the markets look like.
+    - Next_review_time: Here you will output the time you want to check the market again. Think of this as you are scheduling the next time you will run analysis. This is incredibly important to keep your loop cycle going, it can never stop, so you always need a next_review_time in the future, and no matter what the markets look like. Do NOT use 07:00 UTC — that is when SOD runs; use 06:00, 08:00, or another time that matches what you are waiting for.
      - If theres absolutely nothing going on in the markets and you are sure nothing can happen, you can set your next review time to 21:00 UTC for example.
-     - When you get to the late end of the current day (around 10-11pm UTC) and you think your next run will be the next day, you can set your next review time to be in the morning so something like 06:00 UTC.
+     - When you get to the late end of the current day (around 10-11pm UTC) and you think your next run will be the next day, you can set your next review time to be in the morning so something like 06:00 UTC (not 07:00 — that is SOD).
      - Remember this and everythign you do must be in accordance with your current strategy. Depending on what you are waiting for, what you want to see next, or when the markets will move, you will set your next_review_time to ensure you have enough time to analyse whats going on and output another analysis for the next run.
     - Key_points: Here you will output 3 concise points about the most critical aspects of your analysis. Think make or break points, they need to really paint the picture of todays analysis. 1 about the fundamental market conditions, one about the technical setup in accordance with the strategy, and one about the current risks or opportunities this strategy will have.
 
@@ -218,7 +225,7 @@ You MUST respond with valid JSON only — no prose, no markdown. Format:
 
 DECISION FIELD RULES:
 - monitoring_timeframes: Array of timeframes to monitor (e.g., ["H1","H4"] for active, ["D1","W1"] for context)
-- next_review_time: When to run the next intraday check. Consider:
+- next_review_time: When to run the next intraday check. Must NOT be 07:00 UTC (reserved for SOD). Must align with your summary (e.g. Asian session complete → 08:00 UTC; next H1 close → next full hour). Consider:
     WAIT=1–6h | WATCH=15–60min | HOTZONE=5–15min | ENTER=5min
 - key_points: 3–5 concise points covering the most critical aspects of your analysis
 - enter_order: Populate ONLY when action="ENTER". All fields null otherwise.
@@ -262,11 +269,18 @@ SYSTEM CONTEXT:
 - This SOD analysis has already run today, so now this analysis is aimed at continuing from the previous analysis to keep the AI checking the charts for what it should be looking at continuing on and checking for any chart movements, entries or managing positions. 
 - You will see the CURRENT TIME in the context provided
 - You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided. 
-- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks.
-- The checks must be in accordance with the strategy, you analyse the market initially based on the information you receive and based on the strategy rules. Then based on such rules and what you are waiting to see next, you set that as the next_review_time..
-- For example, if your strategy requires you wait for the next hourly candle to close, and current time is 12:47 UTC you set your next_review_time to the 13:00 UTC.
 - You use Action Descriptions to guide your decision-making process and outline what you are waiting for, analysing, watching, and when you would like to manage positions.
 - Tomorrow's SOD runs automatically at 07:00 UTC — you do not need to schedule it
+
+NEXT RUN TIME:
+- You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided.
+- next_review_time is for an INTRADAY check only. Do NOT set next_review_time to 07:00 UTC — that slot is reserved for the automatic SOD run. Use a different time (e.g. 06:00, 08:00, 09:00) that matches what you are waiting for.
+- next_review_time MUST match your summary and explanation: e.g. "wait for Asian session to complete" → set next_review_time to when Asian session ends (e.g. 08:00 UTC); "wait for next H1 close" → set to the next full hour after CURRENT TIME (e.g. current 12:47 UTC → 13:00 UTC); "nothing going on" → e.g. 21:00 UTC or 06:00 UTC next day.
+- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks.
+- IF YOU GET THIS STEP WRONG, THE PROCESS WILL NOT WORK AND YOUR ANALYSIS WILL STOP.
+- YOU MUST SET THE NEXT_REVIEW_TIME NO MATTER WHAT. IT MUST BE IN THE FUTURE, MUST NOT BE 07:00 UTC, AND MUST ALIGN WITH WHAT YOU SAID YOU ARE WAITING FOR.
+- YOU SEE THE CURRENT DATETIME — use it. Set the next time you want to check based on your analysis (e.g. current 04:00, waiting for Asian session complete → 08:00 UTC; current 12:47, waiting for H1 close → 13:00 UTC).
+- You are essentially scheduling every time you analyse the chart; keep the loop going with a time that makes sense for your decision.
 
 ACTION DESCRIPTIONS:
 - WAIT    — No immediate action. Conditions unclear or unfavourable. Wait for better setup or clearer direction.
@@ -303,9 +317,9 @@ INTRADAY ANALYSIS REQUIREMENTS:
     - Explanation: Here you explain the reasoning and analysis behind your summary. You explain the current market bias, market structure, key levels, trend, relevant factors, all in accordance to the strategy ofcourse. 
        This is a detailed explanation that your next run will use to understand your thinking and how it should operate. This should be detailed, accurate, explanatory and NOT approximate, it should be direct. 
     - Monitoring_timeframes: Here you will output the timeframes you will be monitoring in your next run. You should output exactly the ones you want to see, as you will receive chart and ohlc data for these timeframes on your subsequent intraday run.
-    - Next_review_time: Here you will output the time you want to check the market again. Think of this as you are scheduling the next time you will run analysis. This is incredibly important to keep your loop cycle going, it can never stop, so you always need a next_review_time in the future, and no matter what the markets look like.
+    - Next_review_time: Here you will output the time you want to check the market again. Think of this as you are scheduling the next time you will run analysis. This is incredibly important to keep your loop cycle going, it can never stop, so you always need a next_review_time in the future, and no matter what the markets look like. Do NOT use 07:00 UTC — that is when SOD runs; use 06:00, 08:00, or another time that matches what you are waiting for.
      - If theres absolutely nothing going on in the markets and you are sure nothing can happen, you can set your next review time to 21:00 UTC for example.
-     - When you get to the late end of the current day (around 10-11pm UTC) and you think your next run will be the next day, you can set your next review time to be in the morning so something like 06:00 UTC.
+     - When you get to the late end of the current day (around 10-11pm UTC) and you think your next run will be the next day, you can set your next review time to be in the morning so something like 06:00 UTC (not 07:00 — that is SOD).
      - Remember this and everythign you do must be in accordance with your current strategy. Depending on what you are waiting for, what you want to see next, or when the markets will move, you will set your next_review_time to ensure you have enough time to analyse whats going on and output another analysis for the next run.
     - Key_points: Here you will output 3 concise points about the most critical aspects of your analysis. Think make or break points, they need to really paint the picture of todays analysis. 1 about the fundamental market conditions, one about the technical setup in accordance with the strategy, and one about the current risks or opportunities this strategy will have.
 
@@ -403,7 +417,7 @@ You MUST respond with valid JSON only — no prose, no markdown. Format:
 
 DECISION FIELD RULES:
 - monitoring_timeframes: Array of timeframes to monitor (e.g., ["H1","H4"] for active, ["D1","W1"] for context)
-- next_review_time: When to run the next intraday check. Consider:
+- next_review_time: When to run the next intraday check. Must NOT be 07:00 UTC (reserved for SOD). Must align with your summary (e.g. Asian session complete → 08:00 UTC; next H1 close → next full hour). Consider:
     WAIT=1–6h | WATCH=15–60min | HOTZONE=5–15min | ENTER=5min
 - key_points: 3–5 concise points covering the most critical aspects of your analysis
 - enter_order: Populate ONLY when action="ENTER". All fields null otherwise.
