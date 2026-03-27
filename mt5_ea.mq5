@@ -269,8 +269,15 @@ void ParseAIResponse(string response)
    string nextReviewStr = ExtractJSONString(response, "next_review_time");
    if(StringLen(nextReviewStr) > 0)
    {
-      NextReviewTime = StringToTime(nextReviewStr);
-      Print("Next Review: ", TimeToString(NextReviewTime));
+      NextReviewTime = ParseISO8601ToServerTime(nextReviewStr);
+      if(NextReviewTime > 0)
+      {
+         Print("Next Review (server time): ", TimeToString(NextReviewTime));
+      }
+      else
+      {
+         Print("WARNING: Could not parse next_review_time: ", nextReviewStr);
+      }
    }
    
    // Extract monitoring_timeframes (as comma-separated string)
@@ -1673,6 +1680,32 @@ int FindMatchingBrace(string json, int startPos)
    }
    
    return -1;
+}
+
+//+------------------------------------------------------------------+
+//| Parse ISO-8601 UTC time (e.g. 2026-03-27T08:00:00Z) to server   |
+//| time so it can be compared directly with TimeCurrent().          |
+//+------------------------------------------------------------------+
+datetime ParseISO8601ToServerTime(string isoTime)
+{
+   if(StringLen(isoTime) < 19)
+      return 0;
+
+   // Supported input shape: YYYY-MM-DDTHH:MM:SSZ
+   // Remove trailing 'Z' (UTC marker) and normalize separators.
+   string normalized = isoTime;
+   StringReplace(normalized, "T", " ");
+   StringReplace(normalized, "Z", "");
+   StringReplace(normalized, "-", ".");
+
+   datetime utcTime = StringToTime(normalized);
+   if(utcTime <= 0)
+      return 0;
+
+   // Convert UTC timestamp to broker server timestamp.
+   // TimeCurrent() is server time and TimeGMT() is UTC.
+   int serverOffsetSeconds = (int)(TimeCurrent() - TimeGMT());
+   return utcTime + serverOffsetSeconds;
 }
 
 //+------------------------------------------------------------------+
