@@ -15,7 +15,7 @@ BotCore is a trading system where AI performs full discretionary analysis using 
 5. **GPT Vision** (`gpt_vision.py`) - Chart image analysis
 6. **Market Data** (`market_data.py`) - Market context service
 7. **Database** (`database.py`) - PostgreSQL for locked levels and setups
-8. **MT5 EA** (`mt5_ea.mq5`) - Trade execution with safety limits
+8. **MT5 EA** (`AIBot_EA.mq5`) - Trade execution with safety limits
 
 ## Setup
 
@@ -50,7 +50,7 @@ python api_server.py
 
 ### 5. Install MT5 EA
 
-1. Copy `mt5_ea.mq5` to MetaTrader 5 `Experts` folder
+1. Copy `AIBot_EA.mq5` to MetaTrader 5 `Experts` folder
 2. Configure EA inputs (ServerURL, risk limits, etc.)
 3. Attach to chart and enable auto-trading
 

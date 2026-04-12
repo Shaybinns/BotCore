@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                    BotCore_EA.mq5 |
+//|                                                      AIBot_EA.mq5 |
 //|                                  AI-Led Discretionary Trading EA |
 //|                                                                  |
 //+------------------------------------------------------------------+
@@ -41,7 +41,7 @@ string LastAIResponse = "";
 int OnInit()
 {
    Print("========================================");
-   Print("BotCore EA v2.0 Initialized");
+   Print("AIBot EA v2.0 Initialized");
    Print("Server URL: ", ServerURL);
    Print("Trading Symbol: ", TradingSymbol);
    Print("SOD Time: ", SODTime);
@@ -64,7 +64,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   Print("BotCore EA deinitialized");
+   Print("AIBot EA deinitialized");
 }
 
 //+------------------------------------------------------------------+
