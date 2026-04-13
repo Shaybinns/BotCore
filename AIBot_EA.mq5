@@ -10,7 +10,7 @@
 //--- Input parameters
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
-input string   SODTime = "07:00";                     // Start of Day time — BROKER SERVER TIME (HH:MM, 24h). e.g. broker GMT+3: enter 02:00 for 23:00 UTC / midnight UK
+input string   SODTime = "07:00";                     // Start of Day time — GMT/UTC (HH:MM, 24h). Converted to broker server time automatically. e.g. enter 00:00 for midnight UTC.
 input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
 input double   InitialAccountSize = 0;                // Initial balance for realised PnL (0 = use current balance only, no realised sent)
 
@@ -143,20 +143,27 @@ void OnTick()
 
 //+------------------------------------------------------------------+
 //| Phase 2: Check and trigger SOD                                   |
-//| SODTime is in BROKER SERVER TIME. next_review_time from the API  |
-//| is UTC (ISO-8601 Z) and is converted to server time by           |
-//| ParseISO8601ToServerTime() automatically — DST-safe.             |
+//| SODTime is entered in GMT/UTC. Converted to broker server time   |
+//| dynamically — DST-safe. next_review_time from the API is also    |
+//| UTC (ISO-8601 Z) and is converted by ParseISO8601ToServerTime(). |
 //+------------------------------------------------------------------+
 void CheckSODTime()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    
-   // Parse SODTime string (HH:MM)
-   int sodHour = (int)StringToInteger(StringSubstr(SODTime, 0, 2));
-   int sodMin  = (int)StringToInteger(StringSubstr(SODTime, 3, 2));
+   // Parse SODTime string (HH:MM) — input is GMT, convert to server time
+   int sodHourGMT = (int)StringToInteger(StringSubstr(SODTime, 0, 2));
+   int sodMinGMT  = (int)StringToInteger(StringSubstr(SODTime, 3, 2));
    
-   if(dt.hour == sodHour && dt.min == sodMin)
+   // Round server offset to nearest hour (same approach as ParseISO8601ToServerTime)
+   long rawOffset = (long)(TimeCurrent() - TimeGMT());
+   int serverOffsetHours = (int)MathRound((double)rawOffset / 3600.0);
+   
+   int sodHourServer = (sodHourGMT + serverOffsetHours) % 24;
+   if(sodHourServer < 0) sodHourServer += 24;
+   
+   if(dt.hour == sodHourServer && dt.min == sodMinGMT)
    {
       datetime currentDay = StringToTime(IntegerToString(dt.year) + "." + 
                                           IntegerToString(dt.mon) + "." + 
