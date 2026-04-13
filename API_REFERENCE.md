@@ -136,6 +136,50 @@ GET /api/strategies/London%20Liquidity%20Sweep
 
 ---
 
+### Update a Strategy
+`PUT /api/strategies/<strategy_name>`
+
+Update an existing strategy's prompt text. The strategy must already exist — returns `404` if not found. Use `POST /api/strategies` to create a new one.
+
+`uploaded_by` is optional — if omitted the existing value is preserved.
+
+**Request body**
+```json
+{
+  "strategy_prompt": "Updated full strategy prompt text...",
+  "uploaded_by":     "john@example.com"
+}
+```
+
+**Example**
+```
+PUT /api/strategies/London%20Liquidity%20Sweep
+```
+
+**Success response** `200`
+```json
+{
+  "success": true,
+  "strategy": {
+    "strategy_name": "London Liquidity Sweep",
+    "uploaded_by":   "john@example.com",
+    "created_at":    "2024-01-15T08:00:00Z",
+    "updated_at":    "2024-01-20T10:30:00Z"
+  }
+}
+```
+
+> The `strategy_prompt` text is not returned — use `GET /api/strategies/<name>` to retrieve it.
+
+**Error responses**
+| Status | Meaning |
+|--------|---------|
+| `400`  | Missing `strategy_prompt` or no JSON body |
+| `404`  | Strategy name not found — use POST to create it first |
+| `500`  | Database error |
+
+---
+
 ### Delete a Strategy
 `DELETE /api/strategies/<strategy_name>`
 
@@ -221,7 +265,7 @@ The name must **exactly match** a strategy in the database (case-sensitive). If 
 3. Set StrategyName in MT5 EA    → EA now sends the strategy name on every call
 4. POST /api/trading/sod         → AI analyses using General + SOD + your strategy
 5. POST /api/trading/intraday    → AI analyses using General + Intraday + your strategy
-6. POST /api/strategies (again)  → update the prompt any time — takes effect on next EA call
+6. PUT  /api/strategies/<name>   → update the prompt any time — takes effect on next EA call
 7. DELETE /api/strategies/<name> → remove a strategy when no longer needed
 ```
 

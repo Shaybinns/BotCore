@@ -550,6 +550,52 @@ def strategies_get(strategy_name: str):
         return jsonify({"error": str(e), "success": False}), 500
 
 
+@app.route("/api/strategies/<strategy_name>", methods=["PUT"])
+def strategies_update(strategy_name: str):
+    """
+    Update an existing strategy's prompt text.
+
+    The strategy must already exist — returns 404 if not found.
+    Use POST /api/strategies to create a new one.
+
+    Request JSON:
+      {
+        "strategy_prompt": "Updated prompt text...",
+        "uploaded_by":     "john@example.com"   // optional — keeps existing value if omitted
+      }
+
+    Returns the updated strategy record (without the prompt text).
+    """
+    try:
+        existing = get_strategy(strategy_name)
+        if not existing:
+            return jsonify({"error": f"Strategy '{strategy_name}' not found", "success": False}), 404
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        strategy_prompt = (data.get("strategy_prompt") or "").strip()
+        uploaded_by     = (data.get("uploaded_by")     or "").strip() or existing.get("uploaded_by", "")
+
+        if not strategy_prompt:
+            return jsonify({"error": "Missing required field: strategy_prompt"}), 400
+
+        success = save_strategy(strategy_name, strategy_prompt, uploaded_by)
+        if not success:
+            return jsonify({"error": "Failed to update strategy"}), 500
+
+        updated = get_strategy(strategy_name)
+        return jsonify({
+            "success": True,
+            "strategy": {k: v for k, v in updated.items() if k != "strategy_prompt"}
+        }), 200
+
+    except Exception as e:
+        print(f"[strategies/update] Error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
 @app.route("/api/strategies/<strategy_name>", methods=["DELETE"])
 def strategies_delete(strategy_name: str):
     """
@@ -581,7 +627,8 @@ def not_found(error):
             "/api/trading/status",
             "/api/trading/store_positions",
             "/api/strategies",
-            "/api/strategies/<name>"
+            "/api/strategies/<name>",
+            "PUT /api/strategies/<name>"
         ]
     }), 404
 
