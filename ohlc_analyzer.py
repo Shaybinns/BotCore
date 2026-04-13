@@ -6,7 +6,7 @@ Converts raw candle arrays into structured technical analysis for GPT-4o.
 - Swing points (highs/lows)
 - Imbalances (detect_imb): 3-candle gaps
 - FVGs (detect_fvg): imbalance after swing level is broken and price crosses back; one of the 3 candles must touch the level
-- Session highs/lows (H1 only): 00:00–06:00, 08:00–12:00, 13:00–17:00 UTC
+- Session highs/lows (H1 only): 01:00–07:00, 08:00–12:00, 13:00–17:00 London time
 
 Candle arrays arrive newest-first (index 0 = most recent bar).
 Each candle: {"time": int, "open": float, "high": float, "low": float, "close": float, "volume": int}
@@ -16,6 +16,9 @@ Output feeds directly into the === OHLC DATA ANALYSIS === section of the trading
 
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+_LONDON_TZ = ZoneInfo("Europe/London")
 
 # =============================================================================
 # TIMEFRAME ORDERING  (highest → lowest)
@@ -194,37 +197,39 @@ def _detect_fvg(
 
 
 # =============================================================================
-# SESSION HIGHS/LOWS (H1 only; UTC sessions)
+# SESSION HIGHS/LOWS (H1 only; London-time sessions)
 # =============================================================================
 
-# Sessions: (label, start_hour_utc, end_hour_utc) — end is exclusive
+# Sessions: (label, start_hour_london, end_hour_london) — end is exclusive.
+# All times are London local (BST or GMT) — they never shift because OHLC
+# timestamps are already converted to London local time by the EA.
 _SESSIONS = [
-    ("00:00-06:00", 0, 6),
-    ("07:00-12:00", 7, 12),
-    ("13:00-17:00", 13, 17),
+    ("Asian  01:00-07:00", 1,  7),
+    ("London 08:00-12:00", 8,  12),
+    ("NY     13:00-17:00", 13, 17),
 ]
 
 
 def _session_highs_lows(candles: List[Dict]) -> List[Dict]:
     """
-    Compute high and low per session from H1 candles (UTC).
-    Candles newest-first. Each candle has "time" (Unix).
-    If we're inside a session (e.g. 09:30), report current_high / current_low for that session.
+    Compute high and low per session from H1 candles (London local time).
+    Candles newest-first. Each candle has "time" (London-local epoch from EA).
+    If we're currently inside a session, note it as in-progress.
     If no data for a session, high/low are "NA".
     """
     if not candles:
         return []
 
-    now = datetime.now(timezone.utc)
-    current_hour = now.hour
+    now_london = datetime.now(_LONDON_TZ)
+    current_hour = now_london.hour
     results = []
 
     for label, start_h, end_h in _SESSIONS:
         entry = {"session": label, "high": None, "low": None}
-        # Check if we're currently inside this session
         in_progress = start_h <= current_hour < end_h
 
-        # Collect candles that fall in this session (UTC)
+        # Collect candles that fall in this London-time session window.
+        # fromtimestamp with utc reads the London-local epoch as a clock value.
         session_candles = []
         for c in candles:
             t = c.get("time")

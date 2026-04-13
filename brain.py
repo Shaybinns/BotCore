@@ -8,6 +8,7 @@ OHLC analysis, chart analysis, market data, and AI reasoning.
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List
 
 from ohlc_analyzer import analyze_ohlc_data
@@ -27,6 +28,16 @@ from database import (
 # Market data is cached in the DB as 'market_data_note'.
 # Intraday runs re-use it if fresher than this threshold.
 MARKET_DATA_CACHE_HOURS = 4
+
+_LONDON_TZ = ZoneInfo("Europe/London")
+
+
+def _london_time_str() -> str:
+    """Return a human-readable London time string with UTC offset label."""
+    now_london = datetime.now(_LONDON_TZ)
+    offset_h = int(now_london.utcoffset().total_seconds() // 3600)
+    abbr = "BST" if offset_h == 1 else "GMT"
+    return now_london.strftime(f"%Y-%m-%d %H:%M {abbr} (UTC{offset_h:+d})")
 
 
 def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
@@ -201,10 +212,12 @@ def sod_action(
     context_parts = [
         f"SYMBOL: {symbol}",
         f"ANALYSIS DATE: {datetime.now(timezone.utc).isoformat()}",
-        f"CURRENT TIME: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"CURRENT TIME (London): {_london_time_str()}",
+        "NOTE: All OHLC candle timestamps and chart images are in London local time.",
+        "      next_review_time must be output as London local time (format: YYYY-MM-DDTHH:MM:SS, no Z).",
         "",
         "=== SYSTEM INFO ===",
-        "SOD (Start of Day) analysis — runs automatically at 07:00 UTC every morning.",
+        "SOD (Start of Day) analysis — runs automatically at 07:00 London time every morning.",
         "Use this analysis to set your bias and trading plan for the full day ahead.",
         ""
     ]
@@ -407,10 +420,12 @@ def intraday_action(
     context_parts = [
         f"SYMBOL: {symbol}",
         f"ANALYSIS TIME: {datetime.now(timezone.utc).isoformat()}",
-        f"CURRENT TIME: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"CURRENT TIME (London): {_london_time_str()}",
+        "NOTE: All OHLC candle timestamps and chart images are in London local time.",
+        "      next_review_time must be output as London local time (format: YYYY-MM-DDTHH:MM:SS, no Z).",
         "",
         "=== SYSTEM INFO ===",
-        "SOD (Start of Day) analysis runs automatically at 07:00 UTC every morning.",
+        "SOD (Start of Day) analysis runs automatically at 07:00 London time every morning.",
         "You are currently in an INTRADAY analysis run.",
         "Use the SOD note below to understand today's overall bias and trading plan.",
         ""

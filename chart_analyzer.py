@@ -175,6 +175,7 @@ def get_chart_image_base64(
             "height":   height,
             "theme":    theme,
             "studies":  studies,
+            "timezone": "Europe/London",
         }
 
         headers = {"Authorization": f"Bearer {CHART_IMG_API_KEY}"}

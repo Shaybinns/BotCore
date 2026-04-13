@@ -189,8 +189,9 @@ bool IsLondonBST()
 //| SODTime is LONDON TIME. Converted to broker server time via:     |
 //|   London → UTC : IsLondonBST() auto-detects the 1h offset       |
 //|   UTC → Server : broker offset calculated dynamically            |
-//| next_review_time from the API is UTC ISO-8601 Z, also converted  |
-//| dynamically by ParseISO8601ToServerTime(). Both are DST-safe.    |
+//| next_review_time from the API is LONDON LOCAL TIME (no Z suffix),|
+//| converted to broker server time by ParseISO8601ToServerTime().   |
+//| Both SODTime and next_review_time use London as the golden source.|
 //+------------------------------------------------------------------+
 void CheckSODTime()
 {
@@ -1349,11 +1350,20 @@ string GetOHLCArray(string symbol, ENUM_TIMEFRAMES timeframe, int count)
    
    if(copied > 0)
    {
+      // Convert broker timestamps to London local time once per call.
+      // broker = London + (serverOffset - londonOffset), always 2h for EET/EEST brokers.
+      // Subtracting that gap gives London local epoch for every candle.
+      long rawOffset        = (long)(TimeCurrent() - TimeGMT());
+      int serverOffsetSecs  = (int)(MathRound((double)rawOffset / 3600.0) * 3600);
+      int londonOffsetSecs  = IsLondonBST() ? 3600 : 0;
+      int brokerToLondonSecs = serverOffsetSecs - londonOffsetSecs;
+
       for(int i = 0; i < copied; i++)
       {
+         datetime londonTime = rates[i].time - brokerToLondonSecs;
          if(i > 0) json += ",";
          json += "{";
-         json += "\"time\":" + IntegerToString((int)rates[i].time) + ",";
+         json += "\"time\":" + IntegerToString((long)londonTime) + ",";
          json += "\"open\":" + DoubleToString(rates[i].open, 5) + ",";
          json += "\"high\":" + DoubleToString(rates[i].high, 5) + ",";
          json += "\"low\":" + DoubleToString(rates[i].low, 5) + ",";
@@ -1754,32 +1764,35 @@ datetime ParseISO8601ToServerTime(string isoTime)
    if(StringLen(isoTime) < 19)
       return 0;
 
-   // Supported input shape: YYYY-MM-DDTHH:MM:SSZ
-   // Remove trailing 'Z' (UTC marker) and normalize separators.
+   // Input: YYYY-MM-DDTHH:MM:SS  (London local time, no Z or offset suffix).
+   // Normalize to the format StringToTime() expects: "YYYY.MM.DD HH:MM:SS".
    string normalized = isoTime;
    StringReplace(normalized, "T", " ");
-   StringReplace(normalized, "Z", "");
+   StringReplace(normalized, "Z", "");   // no-op for London format; kept for safety
    StringReplace(normalized, "-", ".");
 
    Print("DEBUG normalized string passed to StringToTime: [", normalized, "]");
 
-   datetime utcTime = StringToTime(normalized);
-   long dbgUtc = (long)utcTime;
-   Print("DEBUG StringToTime raw epoch: ", dbgUtc, " displayed as: ", TimeToString(utcTime));
-   if(utcTime <= 0)
+   datetime londonTime = StringToTime(normalized);
+   long dbgLdn = (long)londonTime;
+   Print("DEBUG StringToTime raw epoch: ", dbgLdn, " displayed as: ", TimeToString(londonTime));
+   if(londonTime <= 0)
       return 0;
 
-   // Convert UTC timestamp to broker server timestamp.
-   // TimeCurrent() is server time, TimeGMT() is UTC. Offset is always a whole number
-   // of hours — rounding eliminates the 1-second measurement artifact from calling
-   // these two functions at slightly different instants.
-   long rawOffset = (long)(TimeCurrent() - TimeGMT());
-   int serverOffsetSeconds = (int)(MathRound((double)rawOffset / 3600.0) * 3600);
-   int dbgH = serverOffsetSeconds / 3600;
-   int dbgM = (serverOffsetSeconds % 3600) / 60;
-   Print("DEBUG serverOffsetSeconds: ", serverOffsetSeconds, " (", dbgH, "h ", dbgM, "m)");
+   // Convert London local time → broker server time.
+   // London = UTC + londonOffset (0h GMT, 1h BST).
+   // Broker = UTC + serverOffset (always London + 2h for EET/EEST).
+   // Net adjustment = serverOffset − londonOffset = 2h (year-round for this broker).
+   // Rounding to nearest hour eliminates the 1-second measurement artifact.
+   long rawOffset         = (long)(TimeCurrent() - TimeGMT());
+   int serverOffsetSecs   = (int)(MathRound((double)rawOffset / 3600.0) * 3600);
+   int londonOffsetSecs   = IsLondonBST() ? 3600 : 0;
+   int ldnToBrokerSecs    = serverOffsetSecs - londonOffsetSecs;
 
-   datetime result = utcTime + serverOffsetSeconds;
+   int dbgH = ldnToBrokerSecs / 3600;
+   Print("DEBUG London→Broker offset: ", ldnToBrokerSecs, "s (", dbgH, "h)");
+
+   datetime result = londonTime + ldnToBrokerSecs;
    long dbgRes = (long)result;
    Print("DEBUG final NextReviewTime epoch: ", dbgRes, " displayed as: ", TimeToString(result));
    return result;
