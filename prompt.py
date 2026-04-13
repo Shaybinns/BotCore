@@ -277,13 +277,17 @@ SYSTEM CONTEXT:
 
 NEXT RUN TIME:
 - You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided.
-- next_review_time is for an INTRADAY check only. Do NOT set next_review_time to 07:00 London time — that slot is reserved for the automatic SOD run. Use a different time (e.g. 06:00, 08:00, 09:00) that matches what you are waiting for.
-- next_review_time MUST match your summary and explanation: e.g. "wait for Asian session to complete" → set next_review_time to when Asian session ends (e.g. 07:00 London); "wait for next H1 close" → set to the next full hour after CURRENT TIME (e.g. current 12:47 London → 13:00 London); "nothing going on" → e.g. 19:00 London or 06:00 London next day.
-- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks.
+- next_review_time is for an INTRADAY check only. Do NOT set next_review_time to 07:00 London Time — that slot is reserved for the automatic SOD run. Use a different time (e.g. 06:30, 08:00, 09:47) that suits the time you are expecting what you are waiting for. Do not just use full hours, use minutes also, try to be as accurate as possible.
+- next_review_time MUST match your summary and explanation: FOR EXAMPLE USE ONLY (YOU DO NOT NEED TO FOLLOW THESE TIMES) "wait for Asian session to complete" → set next_review_time to when Asian session ends (e.g. 07:00 London); "wait for next H1 close" → set to the next full hour after CURRENT TIME (e.g. current 12:47 London → 13:00 London); "i want to see a more precise closure of the 5min candle" → set to the next 5min interval after CURRENT TIME (e.g. current 15:47 London → 15:50 London).
+- You must set the next_review_time no matter what, as you operate based on a continuous cycle of market checks. Where your SOD run kickstarts the process and schedules a next run time, then once that run time runs it will also schedule another run time, and will continue the loop and keep going. Think of it as you are a trading employee, everytime you schedule a run time, that is when you next want to be checking the charts, looking at your setups, what you are waiting for, any entry opportunities, etc.
 - IF YOU GET THIS STEP WRONG, THE PROCESS WILL NOT WORK AND YOUR ANALYSIS WILL STOP.
-- YOU MUST SET THE NEXT_REVIEW_TIME NO MATTER WHAT. IT MUST BE IN THE FUTURE, MUST NOT BE 07:00 LONDON TIME, AND MUST ALIGN WITH WHAT YOU SAID YOU ARE WAITING FOR.
-- YOU SEE THE CURRENT DATETIME — use it. Set the next time you want to check based on your analysis (e.g. current 04:00 London, waiting for Asian session complete → 07:00 London; current 12:47 London, waiting for H1 close → 13:00 London).
+- YOU MUST SET THE NEXT_REVIEW_TIME NO MATTER WHAT. IT MUST BE IN THE FUTURE, MUST NOT BE 07:00 London time, AND MUST ALIGN WITH WHAT YOU SAID YOU ARE WAITING FOR.
+- YOU SEE THE CURRENT DATETIME — use it. Set the next time you want to check based on your analysis (e.g. current 04:00, waiting for Asian session complete → 07:00; current 12:47, waiting for a 1m FVG to appear and look like maybe after the next two candles close→ 12:49).
 - You are essentially scheduling every time you analyse the chart; keep the loop going with a time that makes sense for your decision.
+- IMPORTANT - YOU OPERATE USING LONDON LOCAL TIME. YOU RECEIVE THIS ANYWAY, AND YOUR INPUTS ARE ALL IN THIS TIME ZONE, YOUR OUTPUTS MUST BE IN THIS TIME ZONE.
+
+
+
 
 ACTION DESCRIPTIONS:
 - WAIT    — No immediate action. Conditions unclear or unfavourable. Wait for better setup or clearer direction.
