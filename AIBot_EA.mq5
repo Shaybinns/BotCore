@@ -10,7 +10,7 @@
 //--- Input parameters
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
-input string   SODTime = "07:00";                     // Start of Day time (HH:MM, 24h format)
+input string   SODTime = "07:00";                     // Start of Day time — BROKER SERVER TIME (HH:MM, 24h). e.g. broker GMT+3: enter 02:00 for 23:00 UTC / midnight UK
 input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
 input double   InitialAccountSize = 0;                // Initial balance for realised PnL (0 = use current balance only, no realised sent)
 
@@ -142,7 +142,10 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Phase 2: Check and trigger SOD at 7am                            |
+//| Phase 2: Check and trigger SOD                                   |
+//| SODTime is in BROKER SERVER TIME. next_review_time from the API  |
+//| is UTC (ISO-8601 Z) and is converted to server time by           |
+//| ParseISO8601ToServerTime() automatically — DST-safe.             |
 //+------------------------------------------------------------------+
 void CheckSODTime()
 {
@@ -267,6 +270,10 @@ void ParseAIResponse(string response)
    
    // Extract next_review_time
    string nextReviewStr = ExtractJSONString(response, "next_review_time");
+   Print("DEBUG raw nextReviewStr: [", nextReviewStr, "]");
+   long dbgTC = (long)TimeCurrent();
+   long dbgGMT = (long)TimeGMT();
+   Print("DEBUG TimeCurrent=", dbgTC, " TimeGMT=", dbgGMT, " offset_sec=", (dbgTC - dbgGMT));
    if(StringLen(nextReviewStr) > 0)
    {
       NextReviewTime = ParseISO8601ToServerTime(nextReviewStr);
@@ -1698,14 +1705,28 @@ datetime ParseISO8601ToServerTime(string isoTime)
    StringReplace(normalized, "Z", "");
    StringReplace(normalized, "-", ".");
 
+   Print("DEBUG normalized string passed to StringToTime: [", normalized, "]");
+
    datetime utcTime = StringToTime(normalized);
+   long dbgUtc = (long)utcTime;
+   Print("DEBUG StringToTime raw epoch: ", dbgUtc, " displayed as: ", TimeToString(utcTime));
    if(utcTime <= 0)
       return 0;
 
    // Convert UTC timestamp to broker server timestamp.
-   // TimeCurrent() is server time and TimeGMT() is UTC.
-   int serverOffsetSeconds = (int)(TimeCurrent() - TimeGMT());
-   return utcTime + serverOffsetSeconds;
+   // TimeCurrent() is server time, TimeGMT() is UTC. Offset is always a whole number
+   // of hours — rounding eliminates the 1-second measurement artifact from calling
+   // these two functions at slightly different instants.
+   long rawOffset = (long)(TimeCurrent() - TimeGMT());
+   int serverOffsetSeconds = (int)(MathRound((double)rawOffset / 3600.0) * 3600);
+   int dbgH = serverOffsetSeconds / 3600;
+   int dbgM = (serverOffsetSeconds % 3600) / 60;
+   Print("DEBUG serverOffsetSeconds: ", serverOffsetSeconds, " (", dbgH, "h ", dbgM, "m)");
+
+   datetime result = utcTime + serverOffsetSeconds;
+   long dbgRes = (long)result;
+   Print("DEBUG final NextReviewTime epoch: ", dbgRes, " displayed as: ", TimeToString(result));
+   return result;
 }
 
 //+------------------------------------------------------------------+
