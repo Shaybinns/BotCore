@@ -10,7 +10,7 @@
 //--- Input parameters
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
-input string   SODTime = "07:00";                     // Start of Day time — GMT/UTC (HH:MM, 24h). Converted to broker server time automatically. e.g. enter 00:00 for midnight UTC.
+input string   SODTime = "07:00";                     // Start of Day time — LONDON TIME (HH:MM, 24h). BST/GMT offset detected automatically.
 input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
 input double   InitialAccountSize = 0;                // Initial balance for realised PnL (0 = use current balance only, no realised sent)
 
@@ -142,28 +142,77 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//| Detect whether London is currently on BST (UTC+1).              |
+//| Rule: BST active from last Sunday of March 01:00 UTC            |
+//|       to   last Sunday of October 01:00 UTC.                    |
+//| Returns true = BST (London = UTC+1), false = GMT (London = UTC) |
+//+------------------------------------------------------------------+
+bool IsLondonBST()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeGMT(), dt);
+
+   int month = dt.mon;
+   int day   = dt.day;
+   int hour  = dt.hour;
+
+   // Fast path — months fully inside or outside BST window
+   if(month < 3 || month > 10) return false;  // Nov–Feb: GMT
+   if(month > 3 && month < 10) return true;   // Apr–Sep: BST
+
+   // Boundary months (March and October both have 31 days).
+   // Find day-of-week for the 31st to locate the last Sunday.
+   MqlDateTime endDt;
+   endDt.year = dt.year; endDt.mon = month; endDt.day = 31;
+   endDt.hour = 0;       endDt.min = 0;     endDt.sec = 0;
+   MqlDateTime endDow;
+   TimeToStruct(StructToTime(endDt), endDow);
+   // day_of_week: 0 = Sunday … 6 = Saturday
+   int lastSunday = 31 - endDow.day_of_week;
+
+   if(month == 3)   // BST starts: last Sunday of March at 01:00 UTC
+   {
+      if(day < lastSunday) return false;
+      if(day > lastSunday) return true;
+      return (hour >= 1);
+   }
+   else             // BST ends:   last Sunday of October at 01:00 UTC
+   {
+      if(day < lastSunday) return true;
+      if(day > lastSunday) return false;
+      return (hour < 1);
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Phase 2: Check and trigger SOD                                   |
-//| SODTime is entered in GMT/UTC. Converted to broker server time   |
-//| dynamically — DST-safe. next_review_time from the API is also    |
-//| UTC (ISO-8601 Z) and is converted by ParseISO8601ToServerTime(). |
+//| SODTime is LONDON TIME. Converted to broker server time via:     |
+//|   London → UTC : IsLondonBST() auto-detects the 1h offset       |
+//|   UTC → Server : broker offset calculated dynamically            |
+//| next_review_time from the API is UTC ISO-8601 Z, also converted  |
+//| dynamically by ParseISO8601ToServerTime(). Both are DST-safe.    |
 //+------------------------------------------------------------------+
 void CheckSODTime()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    
-   // Parse SODTime string (HH:MM) — input is GMT, convert to server time
-   int sodHourGMT = (int)StringToInteger(StringSubstr(SODTime, 0, 2));
-   int sodMinGMT  = (int)StringToInteger(StringSubstr(SODTime, 3, 2));
+   // Parse SODTime string (HH:MM) — input is London time
+   int sodHourLondon = (int)StringToInteger(StringSubstr(SODTime, 0, 2));
+   int sodMinLondon  = (int)StringToInteger(StringSubstr(SODTime, 3, 2));
    
-   // Round server offset to nearest hour (same approach as ParseISO8601ToServerTime)
-   long rawOffset = (long)(TimeCurrent() - TimeGMT());
-   int serverOffsetHours = (int)MathRound((double)rawOffset / 3600.0);
+   // Step 1: London → UTC  (auto-detect BST/GMT)
+   int londonOffset = IsLondonBST() ? 1 : 0;
+   int sodHourUTC   = sodHourLondon - londonOffset;
+   if(sodHourUTC < 0) sodHourUTC += 24;
    
-   int sodHourServer = (sodHourGMT + serverOffsetHours) % 24;
+   // Step 2: UTC → broker server time (rounded to nearest hour — DST-safe)
+   long rawOffset        = (long)(TimeCurrent() - TimeGMT());
+   int  serverOffsetHours = (int)MathRound((double)rawOffset / 3600.0);
+   int  sodHourServer     = (sodHourUTC + serverOffsetHours) % 24;
    if(sodHourServer < 0) sodHourServer += 24;
    
-   if(dt.hour == sodHourServer && dt.min == sodMinGMT)
+   if(dt.hour == sodHourServer && dt.min == sodMinLondon)
    {
       datetime currentDay = StringToTime(IntegerToString(dt.year) + "." + 
                                           IntegerToString(dt.mon) + "." + 
