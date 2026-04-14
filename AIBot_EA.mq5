@@ -248,8 +248,9 @@ void CheckReviewTime()
       Print("Current: ", TimeToString(currentTime));
       Print("========================================");
       
+      NextReviewTime = 0;  // Clear so RunIntraday() can write the new schedule
       RunIntraday();
-      NextReviewTime = 0;  // Clear until next schedule
+      Print("DEBUG post-intraday NextReviewTime: ", NextReviewTime, " = ", TimeToString(NextReviewTime));
    }
 }
 
