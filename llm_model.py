@@ -17,7 +17,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def call_gpt(
     system_prompt: str,
     user_prompt: str,
-    model: str = "gpt-4o",
+    model: str = "gpt-5-mini",
     max_tokens: int = 4000
 ) -> str:
     """
@@ -30,7 +30,7 @@ def call_gpt(
     Args:
         system_prompt: System instructions (SOD or Intraday prompt)
         user_prompt:   Full trading context assembled by brain.py
-        model:         OpenAI model to use (default gpt-4o for quality decisions)
+        model:         OpenAI model to use (default gpt-5-mini for GPT-5 quality at low cost)
         max_tokens:    Max response tokens (default 4000 for detailed decisions)
 
     Returns:
