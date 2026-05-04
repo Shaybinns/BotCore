@@ -54,6 +54,32 @@ def _strategy_mandate_lines(strategy_name: Optional[str]) -> List[str]:
     ]
 
 
+def _london_morning_brief_note_valid_for_sod(cached: Optional[Dict[str, Any]]) -> bool:
+    """
+    True if market_data_note was written today in Europe/London at or after 05:00 local.
+
+    The scheduled morning brief (before SOD) populates this row; same-day SOD then reuses
+    it instead of re-fetching RapidAPI / Perplexity / synthesis.
+    """
+    if not cached:
+        return False
+    created_at_str = cached.get("_db_created_at")
+    if not created_at_str:
+        return False
+    try:
+        created = datetime.fromisoformat(created_at_str)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        london = created.astimezone(_LONDON_TZ)
+        now_ldn = datetime.now(_LONDON_TZ)
+        cutoff = now_ldn.replace(hour=5, minute=0, second=0, microsecond=0)
+        if london.date() != now_ldn.date():
+            return False
+        return london >= cutoff
+    except Exception:
+        return False
+
+
 def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
     """Append account summary and snapshot history to context for the AI."""
     lines = [
@@ -108,10 +134,10 @@ def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
     else:
         print("[market] No market_data_note in DB — fetching fresh...")
 
-        data = get_market_data(symbol)
-        save_analysis_note('GLOBAL', 'market_data_note', data, strategy_name='')
-        print("[market] Market data refreshed and saved to DB")
-        return data
+    data = get_market_data(symbol)
+    save_analysis_note('GLOBAL', 'market_data_note', data, strategy_name='')
+    print("[market] Market data refreshed and saved to DB")
+    return data
 
 
 def sod_action(
@@ -126,7 +152,8 @@ def sod_action(
     Workflow:
       0. Load DB positions + previous run note + strategy (if specified)
       1. OHLC analysis
-      2. Market data  — fetched fresh every SOD and saved to DB (market_data_note)
+      2. Market data  — reuses today's London morning brief (≥05:00) in DB if present;
+                        otherwise fetches and saves (market_data_note)
       3. Chart visual analysis — GPT Vision sees only the chart images, no context
       4. Trading decision  — GPT-4o receives full context including chart observations
       5. Persist result to DB (sod_note), clear yesterday's last_run_note
@@ -166,12 +193,16 @@ def sod_action(
     # Step 1: Parallel data collection
     #   - OHLC analysis       (CPU-light, fast)
     #   - Chart visual analysis (chart-img.com fetches + GPT Vision)
-    #   - Market data           (RapidAPI + 2x Perplexity — fresh every SOD)
+    #   - Market data           (morning brief cache if valid, else RapidAPI + 2x Perplexity)
     # All three are independent. They converge in Step 2.
     # ------------------------------------------------------------------
     timeframes = ["H1", "H4", "D1", "W1"]
 
     def _fetch_market_data_sod():
+        cached = get_analysis_note('GLOBAL', 'market_data_note', strategy_name='')
+        if cached and _london_morning_brief_note_valid_for_sod(cached):
+            print("[market] Using morning brief market_data_note for SOD (no refetch)")
+            return cached
         data = get_market_data(symbol)
         save_analysis_note('GLOBAL', 'market_data_note', data, strategy_name='')
         print("[market] Market data fetched and saved to DB (GLOBAL)")

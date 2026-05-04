@@ -66,6 +66,65 @@ def health_check():
     }), 200
 
 
+def _cron_secret_ok() -> bool:
+    """If CRON_SECRET is set, require matching X-Cron-Secret header."""
+    expected = os.getenv("CRON_SECRET", "").strip()
+    if not expected:
+        return True
+    got = (request.headers.get("X-Cron-Secret") or "").strip()
+    return got == expected
+
+
+@app.route("/api/cron/morning-market-brief", methods=["POST"])
+def cron_morning_market_brief():
+    """
+    Scheduled job: fetch full market intelligence, save GLOBAL market_data_note, post to Telegram.
+
+    Intended to run ~05:00 Europe/London before MT5 SOD. Same-day SOD then reuses DB cache.
+
+    Auth: optional header X-Cron-Secret when CRON_SECRET env is set.
+
+    JSON body (optional): { "symbol": "GBPUSD" } — defaults to MORNING_BRIEF_SYMBOL or GBPUSD.
+
+    Timeouts: market fetch + OpenAI synthesis often 45–90s; gunicorn --timeout should stay ≥120 (see railway.json).
+    """
+    if not _cron_secret_ok():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(force=True, silent=True) or {}
+    symbol = (body.get("symbol") or os.getenv("MORNING_BRIEF_SYMBOL") or "GBPUSD").strip()
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+
+    try:
+        from market_data import get_market_data
+        from database import save_analysis_note
+        from telegram_notify import send_market_brief_to_telegram
+
+        data = get_market_data(symbol)
+        data["_morning_brief"] = True
+        saved = save_analysis_note("GLOBAL", "market_data_note", data, strategy_name="")
+        if not saved:
+            return jsonify({
+                "success": False,
+                "symbol": symbol,
+                "error": "Failed to save market_data_note to database",
+            }), 500
+
+        telegram_result = send_market_brief_to_telegram(data)
+
+        return jsonify({
+            "success": True,
+            "symbol": symbol,
+            "saved_to_db": True,
+            "telegram": telegram_result,
+            "headline": data.get("headline"),
+            "_fetched_at": data.get("_fetched_at"),
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/trading/sod", methods=["POST"])
 def trading_sod():
     """

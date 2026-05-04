@@ -15,6 +15,14 @@ CHART_IMG_API_KEY=your_chart_img_api_key_here
 # Database Configuration (PostgreSQL)
 DATABASE_URL=postgresql://user:password@localhost:5432/botcore
 
+# Morning market brief → Telegram (POST /api/cron/morning-market-brief)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+# Optional: require X-Cron-Secret header on cron routes when set
+CRON_SECRET=
+# Optional default symbol for morning brief when request body omits symbol
+MORNING_BRIEF_SYMBOL=GBPUSD
+
 # CORS Configuration
 CORS_ORIGINS=*
 
