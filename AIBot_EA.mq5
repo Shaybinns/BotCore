@@ -18,12 +18,10 @@ input double   InitialAccountSize = 0;                // Initial balance for rea
 enum EA_STATE
 {
    STATE_INIT,          // Initial state
-   STATE_WAIT,          // AI says WAIT
-   STATE_WATCH,         // AI says WATCH (monitoring level)
-   STATE_HOTZONE,       // AI says HOTZONE (price at level)
+   STATE_CHECK,         // AI says CHECK — analysis only; no order / manage / exit this tick
    STATE_IN_TRADE,      // Position opened
    STATE_MANAGING,      // Managing position
-   STATE_EXITING        // Closing position
+   STATE_EXITING        // Closing position (reserved)
 };
 
 //--- Global variables
@@ -362,17 +360,10 @@ void ParseAIResponse(string response)
    {
       ExecuteExit(response);
    }
-   else if(CurrentAction == "WAIT")
+   // CHECK: any run with no chart execution (was WAIT / WATCH / HOTZONE). Legacy strings still accepted.
+   else if(CurrentAction == "CHECK" || CurrentAction == "WAIT" || CurrentAction == "WATCH" || CurrentAction == "HOTZONE")
    {
-      UpdateState(STATE_WAIT);
-   }
-   else if(CurrentAction == "WATCH")
-   {
-      UpdateState(STATE_WATCH);
-   }
-   else if(CurrentAction == "HOTZONE")
-   {
-      UpdateState(STATE_HOTZONE);
+      UpdateState(STATE_CHECK);
    }
    
    Print("========================================");
@@ -444,7 +435,7 @@ void ExecuteEnter(string response)
    else
    {
       Print("❌ Order placement failed");
-      UpdateState(STATE_WATCH);  // Fallback to WATCH
+      UpdateState(STATE_CHECK);  // Fallback — no fill; continue monitoring
    }
 }
 
@@ -557,7 +548,7 @@ void ExecuteExit(string response)
    {
       Print("✅ Position closed successfully");
       CurrentPositionTicket = -1;
-      UpdateState(STATE_WAIT);
+      UpdateState(STATE_CHECK);
       
       // Update position database after successful exit
       StoreCurrentPositions();

@@ -9,7 +9,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from ohlc_analyzer import analyze_ohlc_data
 from chart_analyzer import analyze_charts_with_gpt_vision
@@ -38,6 +38,20 @@ def _london_time_str() -> str:
     offset_h = int(now_london.utcoffset().total_seconds() // 3600)
     abbr = "BST" if offset_h == 1 else "GMT"
     return now_london.strftime(f"%Y-%m-%d %H:%M {abbr} (UTC{offset_h:+d})")
+
+
+def _strategy_mandate_lines(strategy_name: Optional[str]) -> List[str]:
+    """Opening lines for the trading user prompt: bind decisions to the system strategy block."""
+    name = (strategy_name or "").strip()
+    name_line = f"Strategy name for this run: {name}" if name else "Strategy name for this run: (none — follow any ACTIVE TRADING STRATEGY in the system message.)"
+    return [
+        "=== STRATEGY MANDATE (READ FIRST) ===",
+        "All analysis and trading decisions in this response must follow the ACTIVE TRADING STRATEGY in your "
+        "system message: setup rules, invalidation, risk, session logic, and CHECK vs ENTER / MANAGE / EXIT. "
+        "Ground every conclusion in that strategy; do not substitute a different methodology or contradict it.",
+        name_line,
+        "",
+    ]
 
 
 def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
@@ -209,7 +223,8 @@ def sod_action(
     # ------------------------------------------------------------------
     print("\n[brain] Step 2: Assembling decision context...")
 
-    context_parts = [
+    context_parts = _strategy_mandate_lines(strategy_name)
+    context_parts.extend([
         f"SYMBOL: {symbol}",
         f"ANALYSIS DATE: {datetime.now(timezone.utc).isoformat()}",
         f"CURRENT TIME (London): {_london_time_str()}",
@@ -220,7 +235,7 @@ def sod_action(
         "SOD (Start of Day) analysis — runs automatically at 07:00 London time every morning.",
         "Use this analysis to set your bias and trading plan for the full day ahead.",
         ""
-    ]
+    ])
 
     if previous_run:
         context_parts.extend([
@@ -417,7 +432,8 @@ def intraday_action(
     # ------------------------------------------------------------------
     print("\n[brain] Step 2: Assembling decision context...")
 
-    context_parts = [
+    context_parts = _strategy_mandate_lines(strategy_name)
+    context_parts.extend([
         f"SYMBOL: {symbol}",
         f"ANALYSIS TIME: {datetime.now(timezone.utc).isoformat()}",
         f"CURRENT TIME (London): {_london_time_str()}",
@@ -429,7 +445,7 @@ def intraday_action(
         "You are currently in an INTRADAY analysis run.",
         "Use the SOD note below to understand today's overall bias and trading plan.",
         ""
-    ]
+    ])
 
     if sod_note:
         context_parts.extend([

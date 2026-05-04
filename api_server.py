@@ -345,7 +345,7 @@ def trading_snapshot():
         
         # Placeholder response
         result = {
-            "action": "WAIT",
+            "action": "CHECK",
             "next_run_at_utc": None,
             "message": "Trading snapshot processing not yet implemented"
         }
