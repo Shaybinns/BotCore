@@ -20,6 +20,9 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 # Optional: require X-Cron-Secret header on cron routes when set
 CRON_SECRET=
+
+# Railway only — cron-trigger service Variables (optional if URL matches default in cron-trigger/entrypoint.sh):
+# CRON_TARGET_URL=https://YOUR-botcore-host.up.railway.app/api/cron/morning-market-brief
 # Optional default symbol for morning brief when request body omits symbol
 MORNING_BRIEF_SYMBOL=GBPUSD
 
