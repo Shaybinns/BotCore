@@ -155,7 +155,7 @@ def sod_action(
       2. Market data  — reuses today's London morning brief (≥05:00) in DB if present;
                         otherwise fetches and saves (market_data_note)
       3. Chart visual analysis — GPT Vision sees only the chart images, no context
-      4. Trading decision  — GPT-4o receives full context including chart observations
+      4. Trading decision  — GPT-4o-mini receives full context including chart observations
       5. Persist result to DB (sod_note), clear yesterday's last_run_note
 
     Args:
@@ -307,15 +307,19 @@ def sod_action(
     full_context = "\n".join(context_parts)
 
     # ------------------------------------------------------------------
-    # Step 3: Trading decision — GPT-4o with full assembled context
+    # Step 3: Trading decision — GPT-4o-mini with full assembled context
     # ------------------------------------------------------------------
-    print("\n[brain] Step 3: Sending to GPT-4o for SOD trading decision...")
+    print("\n[brain] Step 3: Sending to GPT-4o-mini for SOD trading decision...")
     if strategy_name:
         print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
         sod_prompt    = compose_sod_prompt(strategy_prompt_text)
-        response_text = call_gpt(system_prompt=sod_prompt, user_prompt=full_context)
-        print(f"[brain] GPT-4o response received ({len(response_text)} chars)")
+        response_text = call_gpt(
+            system_prompt=sod_prompt,
+            user_prompt=full_context,
+            model="gpt-4o-mini",
+        )
+        print(f"[brain] GPT-4o-mini response received ({len(response_text)} chars)")
 
         result = _parse_gpt_response(response_text)
 
@@ -371,7 +375,7 @@ def intraday_action(
       2. Market data  — loaded from DB cache (market_data_note saved by SOD).
                         Re-fetched only if cache is missing or older than MARKET_DATA_CACHE_HOURS.
       3. Chart visual analysis — GPT Vision sees only the chart images, no context
-      4. Trading decision  — GPT-4o receives full context including chart observations
+      4. Trading decision  — GPT-4o-mini receives full context including chart observations
       5. Persist result to DB (last_run_note)
 
     Args:
@@ -524,15 +528,19 @@ def intraday_action(
     full_context = "\n".join(context_parts)
 
     # ------------------------------------------------------------------
-    # Step 3: Trading decision — GPT-4o with full assembled context
+    # Step 3: Trading decision — GPT-4o-mini with full assembled context
     # ------------------------------------------------------------------
-    print("\n[brain] Step 3: Sending to GPT-4o for intraday trading decision...")
+    print("\n[brain] Step 3: Sending to GPT-4o-mini for intraday trading decision...")
     if strategy_name:
         print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
         intraday_prompt = compose_intraday_prompt(strategy_prompt_text)
-        response_text   = call_gpt(system_prompt=intraday_prompt, user_prompt=full_context)
-        print(f"[brain] GPT-4o response received ({len(response_text)} chars)")
+        response_text = call_gpt(
+            system_prompt=intraday_prompt,
+            user_prompt=full_context,
+            model="gpt-4o-mini",
+        )
+        print(f"[brain] GPT-4o-mini response received ({len(response_text)} chars)")
 
         result = _parse_gpt_response(response_text)
 
