@@ -119,8 +119,8 @@ REMEMBER:
 - Adhere to your strategy at all times.
 
 INPUT DATA:
-1. OHLC data across four timeframes: 1h, 4h, 1D, 1W
-2. GPT Vision chart analysis for these timeframes (pure visual observations of these charts)
+1. Structured OHLC analysis for every timeframe present in context (upstream feed decides which TF blocks are included).
+2. GPT Vision chart analysis for this SOD run: H4 and W1 chart images only (pure visual observations of those charts).
 3. Synthesised current market intelligence (regime, risk profile, DXY, forex outlook, catalysts)
 4. Your active trading strategy detailed in the context provided. Ensure you follow these rules and apply them completely. 
 5. Current open positions and previous intraday context (if any)
@@ -168,7 +168,7 @@ You MUST respond with valid JSON only — no prose, no markdown. Format:
     "action": "CHECK" | "ENTER" | "MANAGE" | "EXIT",
     "summary": "Clear description of what you want to do and how you will proceed based on the data. Include your plan for the trading day ahead.",
     "explanation": "Detailed reasoning behind your decision. Reference market structure, key levels, trends, and relevant factors.",
-    "monitoring_timeframes": ["H1", "H4", "D1", "W1"],
+    "monitoring_timeframes": ["M15", "H1", "H4"],
     "next_review_time": "ISO 8601 timestamp (e.g., 2024-01-15T08:00:00Z)",
     "key_points": [
       "Important point 1 about the market analysis",

@@ -154,7 +154,7 @@ def sod_action(
       1. OHLC analysis
       2. Market data  — reuses today's London morning brief (≥05:00) in DB if present;
                         otherwise fetches and saves (market_data_note)
-      3. Chart visual analysis — GPT Vision sees only the chart images, no context
+      3. Chart visual analysis — GPT Vision on H4 and W1 charts only (images only, no other context)
       4. Trading decision  — GPT-4o-mini receives full context including chart observations
       5. Persist result to DB (sod_note), clear yesterday's last_run_note
 
@@ -196,7 +196,8 @@ def sod_action(
     #   - Market data           (morning brief cache if valid, else RapidAPI + 2x Perplexity)
     # All three are independent. They converge in Step 2.
     # ------------------------------------------------------------------
-    timeframes = ["H1", "H4", "D1", "W1"]
+    # SOD uses a higher timeframe stack only → fewer Vision images/tokens vs intraday.
+    timeframes = ["H4", "W1"]
 
     def _fetch_market_data_sod():
         cached = get_analysis_note('GLOBAL', 'market_data_note', strategy_name='')

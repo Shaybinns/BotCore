@@ -384,7 +384,7 @@ def analyze_charts_with_gpt_vision(
     # --- call OpenAI Vision ---
     try:
         response = _get_openai_client().chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=messages,
             max_tokens=3000,
             temperature=0.2

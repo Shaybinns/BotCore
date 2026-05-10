@@ -858,7 +858,7 @@ def chat():
         client  = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": compose_botcore_prompt()},
                 {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
@@ -933,7 +933,7 @@ def chat_stream():
 
                 client = OpenAI(api_key=openai_key)
                 stream = client.chat.completions.create(
-                    model="gpt-4o",
+                    model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": compose_botcore_prompt()},
                         {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
