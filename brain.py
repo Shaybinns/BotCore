@@ -80,6 +80,13 @@ def _london_morning_brief_note_valid_for_sod(cached: Optional[Dict[str, Any]]) -
         return False
 
 
+def _chart_block_for_context(chart_observations: Any) -> str:
+    """Plain-text Vision output, or JSON for error dicts / legacy dict payloads."""
+    if isinstance(chart_observations, str):
+        return chart_observations
+    return json.dumps(chart_observations, indent=2)
+
+
 def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
     """Append account summary and snapshot history to context for the AI."""
     lines = [
@@ -218,7 +225,7 @@ def sod_action(
     print("\n[brain] Step 1: Collecting data in parallel (OHLC + Charts + Market)...")
 
     processed_ohlc    = {}
-    chart_observations = {}
+    chart_observations = ""
     market_context    = {}
 
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -237,8 +244,8 @@ def sod_action(
             elif future is future_charts:
                 try:
                     chart_result = future.result()
-                    chart_observations = chart_result.get("chart_analysis", {})
-                    print(f"[brain] Charts done — {len(chart_observations)} timeframe(s)")
+                    chart_observations = chart_result.get("chart_analysis", "") or ""
+                    print(f"[brain] Charts done — {len(chart_observations)} chars vision text")
                 except Exception as e:
                     print(f"[brain] Chart error: {e}")
                     chart_observations = {"error": str(e)}
@@ -299,7 +306,7 @@ def sod_action(
         json.dumps(processed_ohlc, indent=2),
         "",
         "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
-        json.dumps(chart_observations, indent=2),
+        _chart_block_for_context(chart_observations),
         "",
         "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
         json.dumps(market_context, indent=2)
@@ -429,7 +436,7 @@ def intraday_action(
     print("\n[brain] Step 1: Collecting data in parallel (OHLC + Charts + Market)...")
 
     processed_ohlc     = {}
-    chart_observations = {}
+    chart_observations = ""
     market_context     = {}
     market_from_cache  = False
 
@@ -449,8 +456,8 @@ def intraday_action(
             elif future is future_charts:
                 try:
                     chart_result = future.result()
-                    chart_observations = chart_result.get("chart_analysis", {})
-                    print(f"[brain] Charts done — {len(chart_observations)} timeframe(s)")
+                    chart_observations = chart_result.get("chart_analysis", "") or ""
+                    print(f"[brain] Charts done — {len(chart_observations)} chars vision text")
                 except Exception as e:
                     print(f"[brain] Chart error: {e}")
                     chart_observations = {"error": str(e)}
@@ -520,7 +527,7 @@ def intraday_action(
         json.dumps(processed_ohlc, indent=2),
         "",
         "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
-        json.dumps(chart_observations, indent=2),
+        _chart_block_for_context(chart_observations),
         "",
         "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
         json.dumps(market_context, indent=2)

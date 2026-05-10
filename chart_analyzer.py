@@ -7,7 +7,7 @@ Handles everything chart-related:
   3. Return per-timeframe visual observations to brain.py
 
 Called by brain.py via: analyze_charts_with_gpt_vision(...)
-  Returns: {"chart_analysis": {"H1": "...", "H4": "..."}, "_metadata": {...}}
+  Returns: {"chart_analysis": "<plain-text vision output>", "_metadata": {...}}
 
 brain.py then uses these observations as part of its full decision context.
 Test helpers: save_chart_image(...), get_chart_url(...)
@@ -16,8 +16,6 @@ Test helpers: save_chart_image(...), get_chart_url(...)
 import requests
 import base64
 import os
-import json
-import re
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -48,69 +46,31 @@ def _get_openai_client() -> OpenAI:
 # =============================================================================
 
 CHART_ANALYSIS_PROMPT = """
-You are a professional chart analyst performing pure visual technical analysis on TradingView chart images.
+You are BotCore — a highly advanced AI trading system built for the Global Trading Society Team, you are now performing pure visual technical analysis on TradingView chart images.
 
 You will receive one or more labelled chart images. Each image is preceded by a label like "--- H1 TIMEFRAME CHART ---".
-
-For EACH chart image, provide a detailed, objective visual analysis describing exactly what you see.
+For EACH chart image, provide a compressed but detailed, objective visual analysis describing exactly what you see.
+You are to output your analysis as a bullet point list, no essay, but precise, to the point bullet points of what you see.
 
 ANALYZE EACH CHART FOR:
-
-1. TREND & STRUCTURE:
-   - Overall trend direction (uptrend, downtrend, sideways/ranging)
-   - Market structure sequence: Higher Highs (HH), Higher Lows (HL), Lower Highs (LH), Lower Lows (LL)
-   - Recent breaks of structure (BOS) — where price broke through a prior swing high/low
-
-2. KEY PRICE LEVELS (use exact prices where readable on the chart):
-   - Major support and resistance zones (levels price has reacted to multiple times)
-   - Swing highs and swing lows (notable peaks and troughs)
-   - Round numbers or psychological levels (e.g. 1.3000, 1.2500)
-   - Areas of price congestion or consolidation
-
-3. CANDLESTICK PATTERNS & PRICE ACTION:
-   - Note areas of imbalance, where candle n and candle n+2 do not overlap, leaving a price gap (imbalance).
-   - Note very strong levels, where price has reacted to a level multiple times.
-   - Note areas within a trend where there are levels of imbalance that are still not filled. 
-   - Strong wick rejections at levels
-
-4. FAIR VALUE GAPS (FVG) / IMBALANCES:
-   - 3-candle patterns where the middle candle creates a gap not covered by the first and third candle wicks
-   - Note approximate price range of any visible FVGs. FVGs formed where a high or low is broken and once price comes back to this level, an imbalance candle is formed around this level, with one of the 3 candles closing above or below this level.
-   - Whether price has returned to fill them or they remain open
-
-5. LIQUIDITY ZONES:
-   - Equal highs or equal lows (clustered levels that attract price for liquidity grabs)
-   - Obvious stop clusters: above swing highs (sell-side liq.) or below swing lows (buy-side liq.)
-   - Areas of dense candle bodies indicating high-activity zones
-
-6. CURRENT PRICE POSITION:
-   - Where is the current candle/price relative to key levels?
-   - Is price at support, at resistance, breaking out, or in the middle of a range?
-   - How far is price from the nearest significant level?
-
-7. MOMENTUM & VOLATILITY:
-   - Expanding or contracting candle bodies (acceleration vs. exhaustion)?
-   - Speed of recent price movement
-   - Any visible signs of momentum shift (smaller bodies, longer wicks, spinning tops)?
+- The overall trend direction, recent market structure sequence and recent breaks of structure.
+- The current direction and strenght of order flow of the market, who is dominating and by reactions does it look like momentum, volatility, squeeze, or equal. 
+- EXACT key price levels where readable, major and/or equal high and low levels(HLs), support and resistance levels (SRs).
+- EXACT key price levels where readable of imbalances, 3-candle pattern where the middle candle creates a price gap not also hit by the first and third candle wicks; and whether price has returned to fill them or they remain open.
+- EXACT key price levels where readable of Fair Value Gaps (FVGs), the same pattern as an imbalance, but where a key level of imblanace/HLs/SRs has been broken into, then as price breaks back out of the key level into the direction it came from, the middle candle is formed.
+- EXACT key price levels (where readable) and characteristics of candlestick patterns.
+- Where is the current candle and price relative to the above, what is its EXACT key price levels where readable
 
 IMPORTANT:
 - Be objective — describe only what you can SEE on the chart
 - Use specific price levels wherever visible
-- Identify BOTH bullish and bearish scenarios present on the chart
-- Flag any conflicting signals across the chart
 - Do NOT make trading decisions — only describe what you observe
 
 OUTPUT FORMAT:
-Return a JSON object with one key per timeframe label (e.g. "H1", "H4", "D1", "W1").
+Return your output list with one key per timeframe label (e.g. "H1:...", "H4:...", "D1:...", "W1:...").
 Each value must be a detailed string of your visual observations for that chart.
 
-Example:
-{
-  "H1": "The H1 chart shows a clear downtrend with LH/LL structure since the swing high at 1.0950. Price is currently testing a support zone at 1.0870 that has held twice before. A small bullish engulfing formed on the last closed candle, but momentum is still bearish with expanding red bodies...",
-  "H4": "On the 4H chart, price has been consolidating between 1.0860 support and 1.0930 resistance for the past 8 candles. There is an open FVG between 1.0900 and 1.0915. No clear directional bias — equal highs at 1.0930 could attract price for a liquidity grab before a reversal..."
-}
-
-Return ONLY the JSON object. No markdown, no extra text outside the JSON.
+Return ONLY the string output. No markdown, no extra text outside this.
 """
 
 
@@ -312,11 +272,7 @@ def analyze_charts_with_gpt_vision(
 
     Returns:
         {
-            "chart_analysis": {
-                "H1": "detailed visual description...",
-                "H4": "detailed visual description...",
-                ...
-            },
+            "chart_analysis": "Plain-text bullet/analysis from Vision (no JSON parse).",
             "_metadata": {
                 "symbol": "FX:EURUSD",
                 "timeframes_analyzed": [...],
@@ -389,13 +345,12 @@ def analyze_charts_with_gpt_vision(
             max_tokens=3000,
             temperature=0.2
         )
-        response_text = response.choices[0].message.content
-        print(f"[analysis] GPT Vision response received ({len(response_text)} chars)")
-
-        chart_observations = _parse_chart_response(response_text, chart_images)
+        raw = response.choices[0].message.content or ""
+        chart_text = _normalize_chart_vision_text(raw)
+        print(f"[analysis] GPT Vision response received ({len(chart_text)} chars)")
 
         return {
-            "chart_analysis": chart_observations,
+            "chart_analysis": chart_text,
             "_metadata": {
                 "symbol": formatted_symbol,
                 "timeframes_analyzed": [img["timeframe"] for img in chart_images],
@@ -408,45 +363,14 @@ def analyze_charts_with_gpt_vision(
         raise
 
 
-# =============================================================================
-# INTERNAL — CHART RESPONSE PARSER
-# =============================================================================
-
-def _parse_chart_response(response_text: str, chart_images: list) -> Dict[str, Any]:
-    """
-    Parse the per-timeframe JSON dict returned by GPT Vision.
-
-    GPT is asked to return: {"H1": "...", "H4": "...", ...}
-    If it wraps in markdown fences we strip them first.
-    On parse failure we fall back to storing the raw text under each timeframe key
-    so brain.py still receives something useful.
-    """
-    try:
-        # Strip markdown fences if present
-        if "```json" in response_text:
-            start    = response_text.find("```json") + 7
-            end      = response_text.find("```", start)
-            json_str = response_text[start:end].strip()
-        elif "```" in response_text:
-            start    = response_text.find("```") + 3
-            end      = response_text.find("```", start)
-            json_str = response_text[start:end].strip()
-        else:
-            json_str = response_text.strip()
-
-        match = re.search(r"\{.*\}", json_str, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            print("[parse] Chart analysis JSON parsed OK")
-            return parsed
-
-        parsed = json.loads(json_str)
-        print("[parse] Chart analysis JSON parsed OK")
-        return parsed
-
-    except json.JSONDecodeError as e:
-        print(f"[parse] Could not parse chart analysis JSON: {e}")
-        # Fall back: store the raw text under each timeframe key
-        fallback = {img["timeframe"]: response_text for img in chart_images}
-        fallback["_parse_error"] = str(e)
-        return fallback
+def _normalize_chart_vision_text(text: str) -> str:
+    """Strip whitespace; if the model wrapped prose in markdown fences, unwrap."""
+    s = (text or "").strip()
+    if s.startswith("```"):
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            s = s[first_nl + 1 :]
+        end = s.rfind("```")
+        if end != -1:
+            s = s[:end]
+    return s.strip()
