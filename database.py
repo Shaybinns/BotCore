@@ -3,18 +3,22 @@ Database Layer - PostgreSQL Integration
 
 8 tables:
   analysis_notes    — per EA (magic_number + symbol + strategy): sod_analysis, intraday_analysis
-  bot_action        — per EA (magic_number): next_run_time, enter/manage/exit trade payloads
+  bot_action        — per EA (magic_number): next_review_time, action_type, enter/manage/exit payloads
   market_data_cache — global synthesized market intelligence (morning brief)
   current_positions — live MT5 positions, fully replaced on each EA update
   trade_events      — append-only audit log of EA execution confirmations
   users             — chat interface user accounts and message history
   strategies        — named strategy prompts, selectable per EA instance
   account_snapshots — per-run account metrics (balance, PnL) for AI context
+
+  test_* tables (testing / audit — append-only per run):
+  test_macro, test_ohlc, test_chart, test_sod, test_intraday, test_output
 """
 
 import psycopg2
 import os
 import json
+import uuid
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -78,16 +82,81 @@ def init_database():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS bot_action (
-            id              SERIAL PRIMARY KEY,
-            magic_number    BIGINT       NOT NULL UNIQUE,
-            next_run_time   VARCHAR(32),
-            enter_trade     JSONB,
-            manage_trade    JSONB,
-            exit_trade      JSONB,
-            trade_id        BIGINT,
-            created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            id                SERIAL PRIMARY KEY,
+            magic_number      BIGINT       NOT NULL UNIQUE,
+            next_review_time  VARCHAR(32),
+            action_type       VARCHAR(10),
+            enter             JSONB,
+            manage            JSONB,
+            exit_action       JSONB,
+            created_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+
+    # Migrate legacy bot_action columns if present.
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'next_run_time'
+            ) THEN
+                ALTER TABLE bot_action RENAME COLUMN next_run_time TO next_review_time;
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'enter_trade'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'enter'
+            ) THEN
+                ALTER TABLE bot_action RENAME COLUMN enter_trade TO enter;
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'manage_trade'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'manage'
+            ) THEN
+                ALTER TABLE bot_action RENAME COLUMN manage_trade TO manage;
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'exit_trade'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'exit_action'
+            ) THEN
+                ALTER TABLE bot_action RENAME COLUMN exit_trade TO exit_action;
+            ELSIF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'exit'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'bot_action'
+                  AND column_name = 'exit_action'
+            ) THEN
+                ALTER TABLE bot_action RENAME COLUMN exit TO exit_action;
+            END IF;
+        END $$
+    """)
+    cursor.execute("""
+        ALTER TABLE bot_action
+            ADD COLUMN IF NOT EXISTS next_review_time VARCHAR(32),
+            ADD COLUMN IF NOT EXISTS action_type VARCHAR(10),
+            ADD COLUMN IF NOT EXISTS enter JSONB,
+            ADD COLUMN IF NOT EXISTS manage JSONB,
+            ADD COLUMN IF NOT EXISTS exit_action JSONB
     """)
 
     cursor.execute("""
@@ -155,6 +224,37 @@ def init_database():
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_snapshots_symbol_strategy_created ON account_snapshots(symbol, strategy_name, created_at DESC)")
+
+    # Test / audit inputs — one append-only row per run per table (linked by run_id).
+    _test_table_ddl = """
+        CREATE TABLE IF NOT EXISTS {table} (
+            id              SERIAL PRIMARY KEY,
+            run_id          UUID         NOT NULL,
+            magic_number    BIGINT       NOT NULL,
+            run_type        VARCHAR(10)  NOT NULL,
+            symbol          VARCHAR(20)  NOT NULL,
+            strategy_name   VARCHAR(100) NOT NULL DEFAULT '',
+            payload         JSONB,
+            content         TEXT,
+            created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    for table in (
+        "test_macro",
+        "test_ohlc",
+        "test_chart",
+        "test_sod",
+        "test_intraday",
+        "test_output",
+    ):
+        cursor.execute(_test_table_ddl.format(table=table))
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_magic_created "
+            f"ON {table}(magic_number, created_at DESC)"
+        )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_run_id ON {table}(run_id)"
+        )
 
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_analysis_notes_lookup "
@@ -359,8 +459,8 @@ def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT magic_number, next_run_time, enter_trade, manage_trade,
-                   exit_trade, trade_id, created_at, updated_at
+            SELECT magic_number, next_review_time, action_type, enter, manage, exit_action,
+                   created_at, updated_at
             FROM bot_action
             WHERE magic_number = %s
         """, (magic_number,))
@@ -373,11 +473,11 @@ def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
 
         return {
             "magic_number": int(row[0]),
-            "next_run_time": row[1],
-            "enter_trade": row[2],
-            "manage_trade": row[3],
-            "exit_trade": row[4],
-            "trade_id": int(row[5]) if row[5] is not None else None,
+            "next_review_time": row[1],
+            "action_type": row[2],
+            "enter": row[3],
+            "manage": row[4],
+            "exit": row[5],  # API key; DB column is exit_action
             "_db_created_at": row[6].isoformat() if row[6] else None,
             "_db_updated_at": row[7].isoformat() if row[7] else None,
         }
@@ -389,35 +489,34 @@ def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
 
 def save_bot_action(
     magic_number: int,
-    next_run_time: Optional[str] = None,
-    enter_trade: Optional[Dict[str, Any]] = None,
-    manage_trade: Optional[Dict[str, Any]] = None,
-    exit_trade: Optional[Dict[str, Any]] = None,
-    trade_id: Optional[int] = None,
+    next_review_time: Optional[str],
+    action_type: Optional[str] = None,
+    enter: Optional[Dict[str, Any]] = None,
+    manage: Optional[Dict[str, Any]] = None,
+    exit: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Upsert bot_action for an EA magic number."""
+    """Upsert bot_action for an EA magic number (full replace each run)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO bot_action
-                (magic_number, next_run_time, enter_trade, manage_trade,
-                 exit_trade, trade_id, updated_at)
+                (magic_number, next_review_time, action_type, enter, manage, exit_action, updated_at)
             VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (magic_number) DO UPDATE SET
-                next_run_time = COALESCE(EXCLUDED.next_run_time, bot_action.next_run_time),
-                enter_trade   = COALESCE(EXCLUDED.enter_trade, bot_action.enter_trade),
-                manage_trade  = COALESCE(EXCLUDED.manage_trade, bot_action.manage_trade),
-                exit_trade    = COALESCE(EXCLUDED.exit_trade, bot_action.exit_trade),
-                trade_id      = COALESCE(EXCLUDED.trade_id, bot_action.trade_id),
-                updated_at    = CURRENT_TIMESTAMP
+                next_review_time = EXCLUDED.next_review_time,
+                action_type      = EXCLUDED.action_type,
+                enter            = EXCLUDED.enter,
+                manage           = EXCLUDED.manage,
+                exit_action      = EXCLUDED.exit_action,
+                updated_at       = CURRENT_TIMESTAMP
         """, (
             magic_number,
-            next_run_time,
-            json.dumps(enter_trade) if enter_trade is not None else None,
-            json.dumps(manage_trade) if manage_trade is not None else None,
-            json.dumps(exit_trade) if exit_trade is not None else None,
-            trade_id,
+            next_review_time,
+            action_type,
+            json.dumps(enter) if enter is not None else None,
+            json.dumps(manage) if manage is not None else None,
+            json.dumps(exit) if exit is not None else None,
         ))
         conn.commit()
         cursor.close()
@@ -429,14 +528,132 @@ def save_bot_action(
         return False
 
 
+# =============================================================================
+# TEST INPUTS (append-only audit log per AI run)
+# =============================================================================
+
+def _test_insert(
+    cursor,
+    table: str,
+    run_id: str,
+    magic_number: int,
+    run_type: str,
+    symbol: str,
+    strategy_name: str,
+    payload: Any = None,
+    content: Optional[str] = None,
+) -> None:
+    payload_json = None
+    if payload is not None:
+        if isinstance(payload, (dict, list)):
+            payload_json = json.dumps(payload)
+        elif isinstance(payload, str):
+            content = content or payload
+        else:
+            payload_json = json.dumps(payload)
+
+    cursor.execute(
+        f"""
+        INSERT INTO {table}
+            (run_id, magic_number, run_type, symbol, strategy_name, payload, content)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+        """,
+        (
+            run_id,
+            magic_number,
+            run_type,
+            symbol,
+            strategy_name or "",
+            payload_json,
+            content,
+        ),
+    )
+
+
+def save_test_run(
+    magic_number: int,
+    run_type: str,
+    symbol: str,
+    strategy_name: str,
+    macro: Any,
+    ohlc: Any,
+    chart: Any,
+    system_prompt: str,
+    flat_output: Dict[str, Any],
+    raw_gpt_response: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Persist all AI inputs and the final flat output for a trading run (testing/audit).
+
+    run_type: 'sod' | 'intraday'
+    Returns run_id (UUID string) on success.
+    """
+    run_id = run_id or str(uuid.uuid4())
+    run_type = (run_type or "").lower()
+    if run_type not in ("sod", "intraday"):
+        raise ValueError("run_type must be 'sod' or 'intraday'")
+
+    chart_content = None
+    chart_payload = None
+    if isinstance(chart, str):
+        chart_content = chart
+    elif chart is not None:
+        chart_payload = chart
+
+    output_payload = {
+        "flat": flat_output,
+        "raw_gpt_response": raw_gpt_response,
+    }
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        _test_insert(
+            cursor, "test_macro", run_id, magic_number, run_type, symbol, strategy_name,
+            payload=macro,
+        )
+        _test_insert(
+            cursor, "test_ohlc", run_id, magic_number, run_type, symbol, strategy_name,
+            payload=ohlc,
+        )
+        _test_insert(
+            cursor, "test_chart", run_id, magic_number, run_type, symbol, strategy_name,
+            payload=chart_payload,
+            content=chart_content,
+        )
+
+        prompt_table = "test_sod" if run_type == "sod" else "test_intraday"
+        _test_insert(
+            cursor, prompt_table, run_id, magic_number, run_type, symbol, strategy_name,
+            content=system_prompt,
+        )
+
+        _test_insert(
+            cursor, "test_output", run_id, magic_number, run_type, symbol, strategy_name,
+            payload=output_payload,
+        )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"[db] test_inputs saved run_id={run_id} ({run_type})")
+        return run_id
+
+    except Exception as e:
+        print(f"[db] save_test_run error: {e}")
+        return None
+
+
 def clear_bot_action_trades(magic_number: int) -> bool:
-    """Clear enter/manage/exit trade payloads after execution or on new day."""
+    """Clear trade payloads after EA execution; keeps next_review_time."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE bot_action
-            SET enter_trade = NULL, manage_trade = NULL, exit_trade = NULL,
+            SET action_type = NULL, enter = NULL, manage = NULL, exit_action = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE magic_number = %s
         """, (magic_number,))
