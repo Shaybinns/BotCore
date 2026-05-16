@@ -1,8 +1,10 @@
 """
 Database Layer - PostgreSQL Integration
 
-6 tables:
-  analysis_notes    — AI analysis outputs (SOD, intraday, market data cache)
+8 tables:
+  analysis_notes    — per EA (magic_number + symbol + strategy): sod_analysis, intraday_analysis
+  bot_action        — per EA (magic_number): next_run_time, enter/manage/exit trade payloads
+  market_data_cache — global synthesized market intelligence (morning brief)
   current_positions — live MT5 positions, fully replaced on each EA update
   trade_events      — append-only audit log of EA execution confirmations
   users             — chat interface user accounts and message history
@@ -37,16 +39,54 @@ def init_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # Drop legacy note_type-based analysis_notes (data cleared on migrate).
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'analysis_notes'
+                  AND column_name = 'note_type'
+            ) THEN
+                DROP TABLE analysis_notes;
+            END IF;
+        END $$
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS analysis_notes (
+            id                SERIAL PRIMARY KEY,
+            magic_number      BIGINT       NOT NULL,
+            symbol            VARCHAR(20)  NOT NULL,
+            strategy_name     VARCHAR(100) NOT NULL DEFAULT '',
+            sod_analysis      TEXT,
+            intraday_analysis TEXT,
+            created_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (magic_number, symbol, strategy_name)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_data_cache (
             id          SERIAL PRIMARY KEY,
-            symbol      VARCHAR(20)  NOT NULL,
-            note_type   VARCHAR(50)  NOT NULL,
-            summary     TEXT,
-            key_points  JSONB,
-            full_response JSONB,
-            created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, note_type)
+            data        JSONB        NOT NULL,
+            created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_action (
+            id              SERIAL PRIMARY KEY,
+            magic_number    BIGINT       NOT NULL UNIQUE,
+            next_run_time   VARCHAR(32),
+            enter_trade     JSONB,
+            manage_trade    JSONB,
+            exit_trade      JSONB,
+            trade_id        BIGINT,
+            created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -100,40 +140,6 @@ def init_database():
         )
     """)
 
-    # ------------------------------------------------------------------
-    # analysis_notes migration: add strategy_name column and update the
-    # unique constraint from (symbol, note_type) to
-    # (symbol, note_type, strategy_name) so multiple strategies trading
-    # the same symbol don't overwrite each other's notes.
-    # These statements are safe to run on every boot (idempotent).
-    # ------------------------------------------------------------------
-    cursor.execute("""
-        ALTER TABLE analysis_notes
-        ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(100) NOT NULL DEFAULT ''
-    """)
-
-    cursor.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'analysis_notes_symbol_note_type_key'
-            ) THEN
-                ALTER TABLE analysis_notes
-                DROP CONSTRAINT analysis_notes_symbol_note_type_key;
-            END IF;
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'analysis_notes_symbol_note_type_strategy_key'
-            ) THEN
-                ALTER TABLE analysis_notes
-                ADD CONSTRAINT analysis_notes_symbol_note_type_strategy_key
-                UNIQUE (symbol, note_type, strategy_name);
-            END IF;
-        END $$
-    """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS account_snapshots (
             id                   SERIAL PRIMARY KEY,
@@ -150,7 +156,13 @@ def init_database():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_snapshots_symbol_strategy_created ON account_snapshots(symbol, strategy_name, created_at DESC)")
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_notes_symbol ON analysis_notes(symbol, note_type, strategy_name)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_notes_lookup "
+        "ON analysis_notes(magic_number, symbol, strategy_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bot_action_magic ON bot_action(magic_number)"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_current_positions_symbol ON current_positions(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -164,100 +176,347 @@ def init_database():
 
 # =============================================================================
 # ANALYSIS NOTES
-# One row per (symbol, note_type, strategy_name). Always upserted — never accumulates.
-# strategy_name='' is used for global/unscoped notes (e.g. market_data_note under GLOBAL).
-# note_type values in use:
-#   sod_note         — full SOD analysis result          (scoped to symbol + strategy)
-#   last_run_note    — most recent intraday result        (scoped to symbol + strategy)
-#   market_data_note — market data cache, stored under   (symbol='GLOBAL', strategy='')
+# One row per (magic_number, symbol, strategy_name).
 # =============================================================================
 
-def get_analysis_note(symbol: str, note_type: str, strategy_name: str = '') -> Optional[Dict[str, Any]]:
-    """
-    Load a note for the given (symbol, note_type, strategy_name).
-    Returns the full_response dict with _db_created_at injected, or None.
-    strategy_name defaults to '' for global notes (market_data_note).
-    """
+def get_analysis_record(
+    magic_number: int,
+    symbol: str,
+    strategy_name: str = '',
+) -> Optional[Dict[str, Any]]:
+    """Load sod_analysis and intraday_analysis for an EA instance."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT full_response, created_at
+            SELECT sod_analysis, intraday_analysis, created_at, updated_at
             FROM analysis_notes
-            WHERE symbol = %s AND note_type = %s AND strategy_name = %s
-        """, (symbol, note_type, strategy_name))
-        result = cursor.fetchone()
+            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
+        """, (magic_number, symbol, strategy_name or ''))
+        row = cursor.fetchone()
         cursor.close()
         conn.close()
 
-        if not result:
+        if not row:
             return None
 
-        full_response = result[0] or {}
-        full_response["_db_created_at"] = result[1].isoformat() if result[1] else None
-        return full_response
+        return {
+            "magic_number": magic_number,
+            "symbol": symbol,
+            "strategy_name": strategy_name or '',
+            "sod_analysis": row[0],
+            "intraday_analysis": row[1],
+            "_db_created_at": row[2].isoformat() if row[2] else None,
+            "_db_updated_at": row[3].isoformat() if row[3] else None,
+        }
 
     except Exception as e:
-        print(f"[db] get_analysis_note error: {e}")
+        print(f"[db] get_analysis_record error: {e}")
         return None
+
+
+def save_sod_analysis(
+    magic_number: int,
+    symbol: str,
+    strategy_name: str,
+    sod_analysis: str,
+) -> bool:
+    """Upsert SOD analysis text; clears intraday_analysis for a fresh trading day."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO analysis_notes
+                (magic_number, symbol, strategy_name, sod_analysis, intraday_analysis, updated_at)
+            VALUES (%s, %s, %s, %s, NULL, CURRENT_TIMESTAMP)
+            ON CONFLICT (magic_number, symbol, strategy_name) DO UPDATE SET
+                sod_analysis      = EXCLUDED.sod_analysis,
+                intraday_analysis = NULL,
+                updated_at        = CURRENT_TIMESTAMP
+        """, (magic_number, symbol, strategy_name or '', sod_analysis))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] save_sod_analysis error: {e}")
+        return False
+
+
+def save_intraday_analysis(
+    magic_number: int,
+    symbol: str,
+    strategy_name: str,
+    intraday_analysis: str,
+) -> bool:
+    """Upsert intraday analysis text (creates row if missing)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO analysis_notes
+                (magic_number, symbol, strategy_name, intraday_analysis, updated_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (magic_number, symbol, strategy_name) DO UPDATE SET
+                intraday_analysis = EXCLUDED.intraday_analysis,
+                updated_at        = CURRENT_TIMESTAMP
+        """, (magic_number, symbol, strategy_name or '', intraday_analysis))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] save_intraday_analysis error: {e}")
+        return False
+
+
+def clear_intraday_analysis(
+    magic_number: int,
+    symbol: str,
+    strategy_name: str = '',
+) -> bool:
+    """Clear intraday_analysis for an EA instance."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE analysis_notes
+            SET intraday_analysis = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
+        """, (magic_number, symbol, strategy_name or ''))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] clear_intraday_analysis error: {e}")
+        return False
+
+
+# =============================================================================
+# MARKET DATA CACHE (global)
+# =============================================================================
+
+def get_market_data_cache() -> Optional[Dict[str, Any]]:
+    """Return latest cached market intelligence with _db_created_at injected."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT data, created_at
+            FROM market_data_cache
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not row:
+            return None
+
+        data = row[0] or {}
+        if isinstance(data, str):
+            data = json.loads(data)
+        data["_db_created_at"] = row[1].isoformat() if row[1] else None
+        return data
+
+    except Exception as e:
+        print(f"[db] get_market_data_cache error: {e}")
+        return None
+
+
+def save_market_data_cache(data: Dict[str, Any]) -> bool:
+    """Append a new market intelligence snapshot (latest row wins on read)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO market_data_cache (data, created_at)
+            VALUES (%s, CURRENT_TIMESTAMP)
+        """, (json.dumps(data),))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] save_market_data_cache error: {e}")
+        return False
+
+
+# =============================================================================
+# BOT ACTION
+# One row per magic_number — scheduling and trade execution payloads for the EA.
+# =============================================================================
+
+def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
+    """Load bot_action row for an EA magic number."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT magic_number, next_run_time, enter_trade, manage_trade,
+                   exit_trade, trade_id, created_at, updated_at
+            FROM bot_action
+            WHERE magic_number = %s
+        """, (magic_number,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not row:
+            return None
+
+        return {
+            "magic_number": int(row[0]),
+            "next_run_time": row[1],
+            "enter_trade": row[2],
+            "manage_trade": row[3],
+            "exit_trade": row[4],
+            "trade_id": int(row[5]) if row[5] is not None else None,
+            "_db_created_at": row[6].isoformat() if row[6] else None,
+            "_db_updated_at": row[7].isoformat() if row[7] else None,
+        }
+
+    except Exception as e:
+        print(f"[db] get_bot_action error: {e}")
+        return None
+
+
+def save_bot_action(
+    magic_number: int,
+    next_run_time: Optional[str] = None,
+    enter_trade: Optional[Dict[str, Any]] = None,
+    manage_trade: Optional[Dict[str, Any]] = None,
+    exit_trade: Optional[Dict[str, Any]] = None,
+    trade_id: Optional[int] = None,
+) -> bool:
+    """Upsert bot_action for an EA magic number."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO bot_action
+                (magic_number, next_run_time, enter_trade, manage_trade,
+                 exit_trade, trade_id, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (magic_number) DO UPDATE SET
+                next_run_time = COALESCE(EXCLUDED.next_run_time, bot_action.next_run_time),
+                enter_trade   = COALESCE(EXCLUDED.enter_trade, bot_action.enter_trade),
+                manage_trade  = COALESCE(EXCLUDED.manage_trade, bot_action.manage_trade),
+                exit_trade    = COALESCE(EXCLUDED.exit_trade, bot_action.exit_trade),
+                trade_id      = COALESCE(EXCLUDED.trade_id, bot_action.trade_id),
+                updated_at    = CURRENT_TIMESTAMP
+        """, (
+            magic_number,
+            next_run_time,
+            json.dumps(enter_trade) if enter_trade is not None else None,
+            json.dumps(manage_trade) if manage_trade is not None else None,
+            json.dumps(exit_trade) if exit_trade is not None else None,
+            trade_id,
+        ))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] save_bot_action error: {e}")
+        return False
+
+
+def clear_bot_action_trades(magic_number: int) -> bool:
+    """Clear enter/manage/exit trade payloads after execution or on new day."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE bot_action
+            SET enter_trade = NULL, manage_trade = NULL, exit_trade = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE magic_number = %s
+        """, (magic_number,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"[db] clear_bot_action_trades error: {e}")
+        return False
+
+
+# =============================================================================
+# LEGACY COMPATIBILITY (brain.py / api_server.py until SOD rework is wired)
+# magic_number defaults to 0 when callers do not pass it yet.
+# =============================================================================
+
+_LEGACY_MAGIC = 0
+
+
+def get_analysis_note(symbol: str, note_type: str, strategy_name: str = '') -> Optional[Dict[str, Any]]:
+    """
+    Deprecated adapter — use get_analysis_record / get_market_data_cache instead.
+    """
+    if symbol == 'GLOBAL' and note_type == 'market_data_note':
+        return get_market_data_cache()
+
+    record = get_analysis_record(_LEGACY_MAGIC, symbol, strategy_name)
+    if not record:
+        return None
+
+    if note_type == 'sod_note':
+        text = record.get('sod_analysis')
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return {"sod_analysis": text, "_db_created_at": record.get("_db_updated_at")}
+
+    if note_type == 'last_run_note':
+        text = record.get('intraday_analysis')
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return {"intraday_analysis": text, "_db_created_at": record.get("_db_updated_at")}
+
+    return None
 
 
 def save_analysis_note(symbol: str, note_type: str, full_response: Dict[str, Any], strategy_name: str = '') -> bool:
     """
-    Upsert a note for (symbol, note_type, strategy_name).
-    Overwrites any existing row for this combination.
-    strategy_name defaults to '' for global notes (market_data_note).
+    Deprecated adapter — use save_sod_analysis / save_intraday_analysis / save_market_data_cache.
     """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    if symbol == 'GLOBAL' and note_type == 'market_data_note':
+        return save_market_data_cache(full_response)
 
-        summary    = full_response.get("decision", {}).get("summary", "")
-        key_points = full_response.get("decision", {}).get("key_points", [])
+    if note_type == 'sod_note':
+        sod_text = full_response.get('sod_analysis')
+        if sod_text is None:
+            sod_text = json.dumps(full_response)
+        elif not isinstance(sod_text, str):
+            sod_text = json.dumps(sod_text)
+        return save_sod_analysis(_LEGACY_MAGIC, symbol, strategy_name, sod_text)
 
-        cursor.execute("""
-            INSERT INTO analysis_notes
-                (symbol, note_type, strategy_name, summary, key_points, full_response, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (symbol, note_type, strategy_name) DO UPDATE SET
-                summary       = EXCLUDED.summary,
-                key_points    = EXCLUDED.key_points,
-                full_response = EXCLUDED.full_response,
-                created_at    = CURRENT_TIMESTAMP
-        """, (symbol, note_type, strategy_name, summary, json.dumps(key_points), json.dumps(full_response)))
+    if note_type == 'last_run_note':
+        text = full_response if isinstance(full_response, str) else json.dumps(full_response)
+        return save_intraday_analysis(_LEGACY_MAGIC, symbol, strategy_name, text)
 
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-
-    except Exception as e:
-        print(f"[db] save_analysis_note error: {e}")
-        return False
+    return False
 
 
 def clear_analysis_notes(symbol: str, note_types: List[str], strategy_name: str = '') -> bool:
-    """
-    Delete specific note types for a (symbol, strategy_name) pair.
-    Used to clear last_run_note at the start of each SOD.
-    strategy_name defaults to '' for global/unscoped notes.
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        placeholders = ','.join(['%s'] * len(note_types))
-        cursor.execute(
-            f"DELETE FROM analysis_notes WHERE symbol = %s AND strategy_name = %s AND note_type IN ({placeholders})",
-            [symbol, strategy_name] + note_types
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-
-    except Exception as e:
-        print(f"[db] clear_analysis_notes error: {e}")
-        return False
+    """Deprecated adapter — clears intraday_analysis when last_run_note is listed."""
+    if 'last_run_note' in note_types:
+        return clear_intraday_analysis(_LEGACY_MAGIC, symbol, strategy_name)
+    return True
 
 
 # =============================================================================
