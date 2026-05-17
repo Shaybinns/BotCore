@@ -51,7 +51,6 @@ struct EATradingPayload
    double manage_new_stop_loss;
    double manage_new_take_profit;
    double manage_new_position_percentage;
-   bool   manage_exit_trade;
    int    exit_trade_id;
 };
 
@@ -360,7 +359,6 @@ void LoadPayloadFromResponse(string json)
    g_Payload.manage_new_stop_loss = ReadJsonDouble(json, "manage_new_stop_loss");
    g_Payload.manage_new_take_profit = ReadJsonDouble(json, "manage_new_take_profit");
    g_Payload.manage_new_position_percentage = ReadJsonDouble(json, "manage_new_position_percentage");
-   g_Payload.manage_exit_trade = ReadJsonBool(json, "manage_exit_trade");
    g_Payload.exit_trade_id = (int)ReadJsonDouble(json, "exit_trade_id");
 }
 
@@ -426,8 +424,7 @@ void ParseAIResponse(string response)
          g_Payload.manage_trade_id,
          g_Payload.manage_new_stop_loss,
          g_Payload.manage_new_take_profit,
-         g_Payload.manage_new_position_percentage,
-         g_Payload.manage_exit_trade
+         g_Payload.manage_new_position_percentage
       );
    }
    else if(CurrentAction == "EXIT")
@@ -518,8 +515,7 @@ void ExecuteManage(
    int ticket,
    double updateSL,
    double updateTP,
-   double partialClosePercent,
-   bool exitTrade
+   double partialClosePercent
 )
 {
    Print("========================================");
@@ -537,17 +533,6 @@ void ExecuteManage(
    string aiAsset = TradingSymbol;
    string aiDirection = "";
    double aiEntryPrice = 0;
-   
-   if(exitTrade)
-   {
-      Print("manage.exit_trade=true — closing position");
-      if(ClosePosition(ticket))
-      {
-         UpdateState(STATE_CHECK);
-         StoreCurrentPositions();
-      }
-      return;
-   }
    
    Print("Manage Actions:");
    if(updateSL > 0) Print("  Update SL: ", updateSL);

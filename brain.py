@@ -306,7 +306,6 @@ def _build_bot_action_payload(
                 or src.get("partial_close_percentage")
                 or legacy.get("partial_close_percentage")
             ),
-            "exit_trade": bool(src.get("exit_trade") or legacy.get("exit_trade")),
         }
 
     elif action_type == "EXIT":
@@ -361,7 +360,6 @@ def _flatten_for_ea(
         "manage_new_stop_loss": manage.get("new_stop_loss"),
         "manage_new_take_profit": manage.get("new_take_profit"),
         "manage_new_position_percentage": manage.get("new_position_percentage"),
-        "manage_exit_trade": bool(manage.get("exit_trade")),
         "exit_trade_id": exit_p.get("trade_id"),
     }
 
