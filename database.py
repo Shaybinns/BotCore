@@ -11,14 +11,12 @@ Database Layer - PostgreSQL Integration
   strategies        — named strategy prompts, selectable per EA instance
   account_snapshots — per-run account metrics (balance, PnL) for AI context
 
-  test_* tables (testing / audit — append-only per run):
-  test_macro, test_ohlc, test_chart, test_sod, test_intraday, test_output
+  test_inputs — one row per AI run (all test fields in a single table)
 """
 
 import psycopg2
 import os
 import json
-import uuid
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -162,6 +160,7 @@ def init_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS current_positions (
             id            SERIAL PRIMARY KEY,
+            magic_number  BIGINT          NOT NULL DEFAULT 0,
             symbol        VARCHAR(20)     NOT NULL,
             ticket        BIGINT          NOT NULL,
             asset         VARCHAR(20)     NOT NULL,
@@ -173,8 +172,16 @@ def init_database():
             lot_size      DECIMAL(10, 2)  NOT NULL,
             entry_time    TIMESTAMP WITH TIME ZONE NOT NULL,
             updated_at    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, ticket)
+            UNIQUE(magic_number, symbol, ticket)
         )
+    """)
+    cursor.execute("""
+        ALTER TABLE current_positions
+            ADD COLUMN IF NOT EXISTS magic_number BIGINT NOT NULL DEFAULT 0
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_current_positions_magic_symbol_ticket
+            ON current_positions(magic_number, symbol, ticket)
     """)
 
     cursor.execute("""
@@ -212,6 +219,7 @@ def init_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS account_snapshots (
             id                   SERIAL PRIMARY KEY,
+            magic_number         BIGINT       NOT NULL DEFAULT 0,
             symbol               VARCHAR(20)  NOT NULL,
             strategy_name        VARCHAR(100) NOT NULL DEFAULT '',
             created_at           TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -223,38 +231,39 @@ def init_database():
             month_pnl            DECIMAL(18, 2)
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_snapshots_symbol_strategy_created ON account_snapshots(symbol, strategy_name, created_at DESC)")
+    cursor.execute("""
+        ALTER TABLE account_snapshots
+            ADD COLUMN IF NOT EXISTS magic_number BIGINT NOT NULL DEFAULT 0
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_account_snapshots_magic_symbol_strategy_created "
+        "ON account_snapshots(magic_number, symbol, strategy_name, created_at DESC)"
+    )
 
-    # Test / audit inputs — one append-only row per run per table (linked by run_id).
-    _test_table_ddl = """
-        CREATE TABLE IF NOT EXISTS {table} (
-            id              SERIAL PRIMARY KEY,
-            run_id          UUID         NOT NULL,
-            magic_number    BIGINT       NOT NULL,
-            run_type        VARCHAR(10)  NOT NULL,
-            symbol          VARCHAR(20)  NOT NULL,
-            strategy_name   VARCHAR(100) NOT NULL DEFAULT '',
-            payload         JSONB,
-            content         TEXT,
-            created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS test_inputs (
+            id                SERIAL PRIMARY KEY,
+            magic_number      BIGINT       NOT NULL,
+            symbol            VARCHAR(20)  NOT NULL,
+            strategy_name     VARCHAR(100) NOT NULL DEFAULT '',
+            run_type          VARCHAR(10)  NOT NULL,
+            test_macro        JSONB,
+            test_ohlc         JSONB,
+            test_sod          TEXT,
+            test_intraday     TEXT,
+            test_chart        TEXT,
+            test_output       JSONB,
+            created_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
-    """
-    for table in (
-        "test_macro",
-        "test_ohlc",
-        "test_chart",
-        "test_sod",
-        "test_intraday",
-        "test_output",
-    ):
-        cursor.execute(_test_table_ddl.format(table=table))
-        cursor.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_magic_created "
-            f"ON {table}(magic_number, created_at DESC)"
-        )
-        cursor.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_run_id ON {table}(run_id)"
-        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_test_inputs_magic_created "
+        "ON test_inputs(magic_number, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_test_inputs_symbol_strategy "
+        "ON test_inputs(symbol, strategy_name)"
+    )
 
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_analysis_notes_lookup "
@@ -529,45 +538,29 @@ def save_bot_action(
 
 
 # =============================================================================
-# TEST INPUTS (append-only audit log per AI run)
+# TEST INPUTS (append-only — one row per AI run, all fields in one table)
 # =============================================================================
 
-def _test_insert(
-    cursor,
-    table: str,
-    run_id: str,
-    magic_number: int,
-    run_type: str,
-    symbol: str,
-    strategy_name: str,
-    payload: Any = None,
-    content: Optional[str] = None,
-) -> None:
-    payload_json = None
-    if payload is not None:
-        if isinstance(payload, (dict, list)):
-            payload_json = json.dumps(payload)
-        elif isinstance(payload, str):
-            content = content or payload
-        else:
-            payload_json = json.dumps(payload)
+def _to_jsonb(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        try:
+            json.loads(value)
+            return value
+        except json.JSONDecodeError:
+            return json.dumps({"text": value})
+    return json.dumps(value)
 
-    cursor.execute(
-        f"""
-        INSERT INTO {table}
-            (run_id, magic_number, run_type, symbol, strategy_name, payload, content)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
-        """,
-        (
-            run_id,
-            magic_number,
-            run_type,
-            symbol,
-            strategy_name or "",
-            payload_json,
-            content,
-        ),
-    )
+
+def _chart_to_text(chart: Any) -> Optional[str]:
+    if chart is None:
+        return None
+    if isinstance(chart, str):
+        return chart
+    return json.dumps(chart)
 
 
 def save_test_run(
@@ -581,27 +574,19 @@ def save_test_run(
     system_prompt: str,
     flat_output: Dict[str, Any],
     raw_gpt_response: Optional[str] = None,
-    run_id: Optional[str] = None,
-) -> Optional[str]:
+) -> bool:
     """
-    Persist all AI inputs and the final flat output for a trading run (testing/audit).
+    Append one test_inputs row for a trading run (testing/audit).
 
-    run_type: 'sod' | 'intraday'
-    Returns run_id (UUID string) on success.
+    run_type: 'sod' | 'intraday' — system prompt goes in test_sod or test_intraday; the other is NULL.
     """
-    run_id = run_id or str(uuid.uuid4())
     run_type = (run_type or "").lower()
     if run_type not in ("sod", "intraday"):
         raise ValueError("run_type must be 'sod' or 'intraday'")
 
-    chart_content = None
-    chart_payload = None
-    if isinstance(chart, str):
-        chart_content = chart
-    elif chart is not None:
-        chart_payload = chart
-
-    output_payload = {
+    test_sod = system_prompt if run_type == "sod" else None
+    test_intraday = system_prompt if run_type == "intraday" else None
+    test_output = {
         "flat": flat_output,
         "raw_gpt_response": raw_gpt_response,
     }
@@ -609,41 +594,32 @@ def save_test_run(
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
-        _test_insert(
-            cursor, "test_macro", run_id, magic_number, run_type, symbol, strategy_name,
-            payload=macro,
-        )
-        _test_insert(
-            cursor, "test_ohlc", run_id, magic_number, run_type, symbol, strategy_name,
-            payload=ohlc,
-        )
-        _test_insert(
-            cursor, "test_chart", run_id, magic_number, run_type, symbol, strategy_name,
-            payload=chart_payload,
-            content=chart_content,
-        )
-
-        prompt_table = "test_sod" if run_type == "sod" else "test_intraday"
-        _test_insert(
-            cursor, prompt_table, run_id, magic_number, run_type, symbol, strategy_name,
-            content=system_prompt,
-        )
-
-        _test_insert(
-            cursor, "test_output", run_id, magic_number, run_type, symbol, strategy_name,
-            payload=output_payload,
-        )
-
+        cursor.execute("""
+            INSERT INTO test_inputs
+                (magic_number, symbol, strategy_name, run_type,
+                 test_macro, test_ohlc, test_sod, test_intraday, test_chart, test_output)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb)
+        """, (
+            magic_number,
+            symbol,
+            strategy_name or "",
+            run_type,
+            _to_jsonb(macro),
+            _to_jsonb(ohlc),
+            test_sod,
+            test_intraday,
+            _chart_to_text(chart),
+            _to_jsonb(test_output),
+        ))
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"[db] test_inputs saved run_id={run_id} ({run_type})")
-        return run_id
+        print(f"[db] test_inputs saved ({run_type}, magic {magic_number})")
+        return True
 
     except Exception as e:
         print(f"[db] save_test_run error: {e}")
-        return None
+        return False
 
 
 def clear_bot_action_trades(magic_number: int) -> bool:
@@ -741,21 +717,29 @@ def clear_analysis_notes(symbol: str, note_types: List[str], strategy_name: str 
 # Fully replaced on every EA update — always reflects live MT5 state.
 # =============================================================================
 
-def store_current_positions(symbol: str, positions: List[Dict[str, Any]]) -> bool:
-    """Replace all positions for a symbol with the new list from the EA."""
+def store_current_positions(
+    symbol: str,
+    positions: List[Dict[str, Any]],
+    magic_number: int,
+) -> bool:
+    """Replace all positions for an EA instance (magic_number + symbol)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM current_positions WHERE symbol = %s", (symbol,))
+        cursor.execute(
+            "DELETE FROM current_positions WHERE symbol = %s AND magic_number = %s",
+            (symbol, magic_number),
+        )
 
         for pos in positions:
             cursor.execute("""
                 INSERT INTO current_positions
-                (symbol, ticket, asset, direction, entry_price, current_price,
+                (magic_number, symbol, ticket, asset, direction, entry_price, current_price,
                  stop_loss, take_profit, lot_size, entry_time, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             """, (
+                magic_number,
                 symbol,
                 pos.get("ticket"),
                 pos.get("asset"),
@@ -779,8 +763,8 @@ def store_current_positions(symbol: str, positions: List[Dict[str, Any]]) -> boo
         return False
 
 
-def get_current_positions(symbol: str) -> List[Dict[str, Any]]:
-    """Return all live positions for a symbol."""
+def get_current_positions(symbol: str, magic_number: int) -> List[Dict[str, Any]]:
+    """Return live positions for an EA instance (magic_number + symbol)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -788,9 +772,9 @@ def get_current_positions(symbol: str) -> List[Dict[str, Any]]:
             SELECT ticket, asset, direction, entry_price, current_price,
                    stop_loss, take_profit, lot_size, entry_time, updated_at
             FROM current_positions
-            WHERE symbol = %s
+            WHERE symbol = %s AND magic_number = %s
             ORDER BY entry_time ASC
-        """, (symbol,))
+        """, (symbol, magic_number))
         results = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -951,6 +935,7 @@ def delete_strategy(strategy_name: str) -> bool:
 def save_account_snapshot(
     symbol: str,
     strategy_name: str,
+    magic_number: int,
     account_size: Optional[float] = None,
     realised_pnl: Optional[float] = None,
     unrealised_pnl: Optional[float] = None,
@@ -958,16 +943,17 @@ def save_account_snapshot(
     week_pnl: Optional[float] = None,
     month_pnl: Optional[float] = None,
 ) -> bool:
-    """Append one account snapshot for this run (symbol + strategy)."""
+    """Append one account snapshot for this EA run (magic_number + symbol + strategy)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO account_snapshots
-            (symbol, strategy_name, account_size, realised_pnl, unrealised_pnl,
+            (magic_number, symbol, strategy_name, account_size, realised_pnl, unrealised_pnl,
              today_realised_pnl, week_pnl, month_pnl)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
+            magic_number,
             symbol,
             strategy_name or '',
             account_size,
@@ -986,10 +972,14 @@ def save_account_snapshot(
         return False
 
 
-def get_account_context_for_analysis(symbol: str, strategy_name: str) -> Dict[str, Any]:
+def get_account_context_for_analysis(
+    symbol: str,
+    strategy_name: str,
+    magic_number: int,
+) -> Dict[str, Any]:
     """
     Return account context for the AI: latest summary plus first 10 and last 10
-    snapshots (by created_at). Used when building SOD/intraday context.
+    snapshots (by created_at), scoped to magic_number + symbol + strategy.
     """
     result = {
         "account_size": None,
@@ -1011,10 +1001,10 @@ def get_account_context_for_analysis(symbol: str, strategy_name: str) -> Dict[st
             SELECT account_size, realised_pnl, unrealised_pnl,
                    today_realised_pnl, week_pnl, month_pnl, created_at
             FROM account_snapshots
-            WHERE symbol = %s AND strategy_name = %s
+            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
             ORDER BY created_at DESC
             LIMIT 1
-        """, (symbol, scoped_strategy))
+        """, (magic_number, symbol, scoped_strategy))
         row = cursor.fetchone()
         if row:
             result["account_size"] = float(row[0]) if row[0] is not None else None
@@ -1039,19 +1029,19 @@ def get_account_context_for_analysis(symbol: str, strategy_name: str) -> Dict[st
             SELECT account_size, realised_pnl, unrealised_pnl,
                    today_realised_pnl, week_pnl, month_pnl, created_at
             FROM account_snapshots
-            WHERE symbol = %s AND strategy_name = %s
+            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
             ORDER BY created_at ASC
             LIMIT 10
-        """, (symbol, scoped_strategy))
+        """, (magic_number, symbol, scoped_strategy))
         result["first_10"] = [row_to_dict(r) for r in cursor.fetchall()]
         cursor.execute("""
             SELECT account_size, realised_pnl, unrealised_pnl,
                    today_realised_pnl, week_pnl, month_pnl, created_at
             FROM account_snapshots
-            WHERE symbol = %s AND strategy_name = %s
+            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
             ORDER BY created_at DESC
             LIMIT 10
-        """, (symbol, scoped_strategy))
+        """, (magic_number, symbol, scoped_strategy))
         result["last_10"] = [row_to_dict(r) for r in cursor.fetchall()]
 
         cursor.close()
