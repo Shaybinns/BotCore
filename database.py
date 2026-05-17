@@ -265,6 +265,17 @@ def init_database():
         "ON test_inputs(symbol, strategy_name)"
     )
 
+    # Legacy: separate test_* tables replaced by test_inputs (columns hold the data).
+    for legacy_test_table in (
+        "test_macro",
+        "test_ohlc",
+        "test_chart",
+        "test_sod",
+        "test_intraday",
+        "test_output",
+    ):
+        cursor.execute(f"DROP TABLE IF EXISTS {legacy_test_table} CASCADE")
+
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_analysis_notes_lookup "
         "ON analysis_notes(magic_number, symbol, strategy_name)"
