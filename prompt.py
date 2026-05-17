@@ -8,12 +8,27 @@ Four base prompts, each serving a distinct role:
   get_botcore_prompt()    — chat interface behaviour and tone
 
 Three compose functions assemble the final system prompt for each call type:
-  compose_sod_prompt(strategy_prompt)       → general + sod + strategy
-  compose_intraday_prompt(strategy_prompt)  → general + intraday + strategy
+  compose_sod_prompt(strategy_prompt)       → general + strategy + sod
+  compose_intraday_prompt(strategy_prompt)  → general + strategy + intraday
   compose_botcore_prompt()                  → general + botcore
 """
 
 from typing import Optional
+
+
+_STRATEGY_SYSTEM_PREFACE = (
+    "\n=== ACTIVE TRADING STRATEGY ===\n"
+    "The following strategy defines exactly how and when you will trade. "
+    "Apply these rules and follow them completely when evaluating setups and making trading decisions.\n\n"
+)
+
+
+def _strategy_system_block(strategy_prompt: str) -> str:
+    """Strategy section for the system message (required for SOD/intraday)."""
+    text = (strategy_prompt or "").strip()
+    if not text:
+        raise ValueError("strategy_prompt is required and cannot be empty")
+    return _STRATEGY_SYSTEM_PREFACE + text
 
 
 # =============================================================================
@@ -71,6 +86,11 @@ The strategy rules given are what drives your analysis and your decision-making 
 You do not validate your own thoughts, you analyse the market, as the market validates your thoughts.
 You are objective, edge focused, analytical, and responsive to the market while adhering to the strategy prompt and rules given.
 Right now you are receiving a lot of contextual data for the charts, and the 4hour and 1day charts, you must carry out your analysis based on your strategy and this data, but you're mainly giving a nice start of day analysis to be used as a reference throughout the day as you continue to trade.
+
+TRADING ANALYSIS:
+Using your strategy and the context data provided, you will analyse the asset you are set to look at, and decide on trading decisions. Your analysis is used by your future self so it needs to be well written and understandable, it needs to understand current markets and also provide predictive analysis to be able to position yourself for market gains.
+You are analysing the markets, as well as reading what has happened you are trying to make money, so you NEED TO BE PREDICTIVE, use the strategy to best place yourself to benefit from reading the markets and positioning to make money.
+Only incorporate macro synthesis/news bias into your analysis if your strategy explicitly says so, if not you do not need to factor it in. If you can use it per the strategy, make sure its directed at the asset you are currently trading/analyzing, you can use the other assets as added context.
 
 NEXT REVIEW TIME:
 - You MUST Schedule next_review_time for when you want to run your next market check (intraday check) in accordance with the strategy prompt provided and what you are looking for in the markets.
@@ -167,7 +187,7 @@ FIELD RULES:
 - sod_analysis: Exactly 3–5 sentences. Grounded in strategy, H4/D1 context and market intel. Stored and referenced on every intraday run today.
 - next_review_time: London local time, no Z. Must be in the future. Must NOT be 07:00 London (automatic SOD). When you will run your first intraday check and what you expect by then.
 - monitoring_timeframes: JSON array of MT5 codes for the timeframes you will next be analysing (M1, M5, M15, M30, H1, H4, D1, W1 only).
-- executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match an open position ticket from context.
+- executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match trade_id from OPEN POSITIONS in context.
   - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number } - all cannot be null.
   - MANAGE: "manage": { "trade_id": number, "new_stop_loss": number or null, "new_take_profit": number or null, "new_position_percentage": number or null } - can be null if you are not changing the field. 
   - EXIT: "exit": { "trade_id": number } — full close only; do not use MANAGE to close
@@ -198,6 +218,11 @@ You are building one continuous decision thread through the day. Each run overwr
 - next_review_time for when you will analyse the market again (aligned with what the strategy needs you to see next).
 - monitoring_timeframes — which timeframes you will look at next at the next_review_time (strategy-driven). Must match the strategy's required TFs.
 - executions (if any) when you are entering, managing, or exiting a trade this run.
+
+TRADING ANALYSIS:
+Using your strategy and the context data provided, you will analyse the asset you are set to look at, and decide on trading decisions. Your analysis is used by your future self so it needs to be well written and understandable, it needs to understand current markets and also provide predictive analysis to be able to position yourself for market gains.
+You are analysing the markets, as well as reading what has happened you are trying to make money, so you NEED TO BE PREDICTIVE, use the strategy to best place yourself to benefit from reading the markets and positioning to make money.
+Only incorporate macro synthesis/news bias into your analysis if your strategy explicitly says so, if not you do not need to factor it in. If you can use it per the strategy, make sure its directed at the asset you are currently trading/analyzing, you can use the other assets as added context.
 
 IMPORTANT:
 This run continues from today's SOD analysis and any previous intraday run in context. Follow your strategy — do not deviate.
@@ -301,7 +326,7 @@ FIELD RULES:
 - intraday_analysis: Exactly 3–5 sentences. Grounded in strategy, and newly available contextual information. First sentence comparing to your previous analysis, and the rest explaining your current analysis and so on. 
 - next_review_time: London local time, no Z. Must be in the future. Must NOT be 07:00 London (automatic SOD). When you will run your first intraday check and what you expect by then.
 - monitoring_timeframes: JSON array of MT5 codes for the timeframes you will next be analysing (M1, M5, M15, M30, H1, H4, D1, W1 only).
-- executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match an open position ticket from context.
+- executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match trade_id from OPEN POSITIONS in context.
   - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number } - all cannot be null.
   - MANAGE: "manage": { "trade_id": number, "new_stop_loss": number or null, "new_take_profit": number or null, "new_position_percentage": number or null } - can be null if you are not changing the field. 
   - EXIT: "exit": { "trade_id": number } — full close only; do not use MANAGE to close
@@ -686,50 +711,38 @@ You are here to advise, explain, analyse and help the user create strategies.
 # These assemble the final system prompt for each call type.
 # =============================================================================
 
-def compose_sod_prompt(strategy_prompt: Optional[str] = None) -> str: 
+def compose_sod_prompt(strategy_prompt: str) -> str:
     """
-    Assemble the full SOD system prompt: general + sod + (strategy if provided).
+    Assemble the full SOD system prompt: general + strategy + sod.
 
     Args:
-        strategy_prompt: Raw prompt text from the strategies table, or None.
+        strategy_prompt: Raw prompt text from the strategies table (required).
 
     Returns:
         Complete system prompt string ready for the GPT API call.
     """
-    parts = [get_general_prompt(), get_sod_prompt()]
-
-    if strategy_prompt and strategy_prompt.strip():
-        parts.append(
-            "\n=== ACTIVE TRADING STRATEGY ===\n"
-            "The following strategy defines exactly how and when you will trade. "
-            "Apply these rules and follow them completely when evaluating setups and making trading decisions.\n\n"
-            + strategy_prompt.strip()
-        )
-
-    return "\n\n".join(parts)
+    return "\n\n".join([
+        get_general_prompt(),
+        _strategy_system_block(strategy_prompt),
+        get_sod_prompt(),
+    ])
 
 
-def compose_intraday_prompt(strategy_prompt: Optional[str] = None) -> str:
+def compose_intraday_prompt(strategy_prompt: str) -> str:
     """
-    Assemble the full intraday system prompt: general + intraday + (strategy if provided).
+    Assemble the full intraday system prompt: general + strategy + intraday.
 
     Args:
-        strategy_prompt: Raw prompt text from the strategies table, or None.
+        strategy_prompt: Raw prompt text from the strategies table (required).
 
     Returns:
         Complete system prompt string ready for the GPT API call.
     """
-    parts = [get_general_prompt(), get_intraday_prompt()]
-
-    if strategy_prompt and strategy_prompt.strip():
-        parts.append(
-            "\n=== ACTIVE TRADING STRATEGY ===\n"
-            "The following strategy defines exactly how and when you will trade. "
-            "Apply these rules and follow them completely when evaluating setups and making trading decisions.\n\n"
-            + strategy_prompt.strip()
-        )
-
-    return "\n\n".join(parts)
+    return "\n\n".join([
+        get_general_prompt(),
+        _strategy_system_block(strategy_prompt),
+        get_intraday_prompt(),
+    ])
 
 
 def compose_botcore_prompt() -> str:

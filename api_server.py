@@ -13,16 +13,22 @@ from flask_cors import CORS
 import os
 import json
 from dotenv import load_dotenv
-from brain import sod_action, intraday_action, _flatten_for_ea, _bot_action_for_api
+from brain import (
+    sod_action,
+    intraday_action,
+    analysis_note_text,
+    format_account_snapshot_line,
+    format_positions_compact,
+)
 from database import (
     store_current_positions,
     get_current_positions,
-    get_bot_action,
     save_strategy,
     get_strategy,
     list_strategies,
     delete_strategy,
     save_account_snapshot,
+    magic_number_is_available,
 )
 
 load_dotenv()
@@ -41,6 +47,27 @@ def _float_or_none(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _persist_ea_state_before_brain(
+    data: dict,
+    symbol: str,
+    strategy_name: str,
+    magic_number: int,
+) -> None:
+    """Upsert account + positions from EA payload before brain reads DB."""
+    save_account_snapshot(
+        symbol=symbol,
+        strategy_name=strategy_name,
+        magic_number=magic_number,
+        account_size=_float_or_none(data.get("account_size")),
+        realised_pnl=_float_or_none(data.get("realised_pnl")),
+        unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
+        today_realised_pnl=_float_or_none(data.get("today_realised_pnl")),
+        week_pnl=_float_or_none(data.get("week_pnl")),
+        month_pnl=_float_or_none(data.get("month_pnl")),
+    )
+    store_current_positions(symbol, data.get("positions", []), magic_number)
 
 
 def _parse_magic_number(data: dict):
@@ -197,18 +224,13 @@ def trading_sod():
                          "or POST /api/strategies to create a new one."
             }), 400
 
-        # Save account snapshot if account data provided
-        save_account_snapshot(
-            symbol=symbol,
-            strategy_name=strategy_name,
-            magic_number=magic_number,
-            account_size=_float_or_none(data.get("account_size")),
-            realised_pnl=_float_or_none(data.get("realised_pnl")),
-            unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
-            today_realised_pnl=_float_or_none(data.get("today_realised_pnl")),
-            week_pnl=_float_or_none(data.get("week_pnl")),
-            month_pnl=_float_or_none(data.get("month_pnl")),
+        magic_ok, magic_msg = magic_number_is_available(
+            magic_number, symbol, strategy_name
         )
+        if not magic_ok:
+            return jsonify({"error": magic_msg}), 409
+
+        _persist_ea_state_before_brain(data, symbol, strategy_name, magic_number)
 
         # Log the SOD data received
         print("=" * 50)
@@ -233,7 +255,6 @@ def trading_sod():
             symbol=symbol,
             ohlc_data=ohlc_data,
             magic_number=magic_number,
-            positions=positions,
             strategy_name=strategy_name,
         )
         
@@ -281,7 +302,7 @@ def trading_intraday():
         ohlc_data = {}
         for key, value in data.items():
             if key not in (
-                "symbol", "positions", "strategy", "magic_number",
+                "symbol", "positions", "strategy", "magic_number", "fill_event",
                 "account_size", "realised_pnl", "unrealised_pnl",
                 "today_realised_pnl", "week_pnl", "month_pnl",
             ) and key.endswith("_DATA"):
@@ -316,18 +337,15 @@ def trading_intraday():
                          "or POST /api/strategies to create a new one."
             }), 400
 
-        # Save account snapshot if account data provided
-        save_account_snapshot(
-            symbol=symbol,
-            strategy_name=strategy_name,
-            magic_number=magic_number,
-            account_size=_float_or_none(data.get("account_size")),
-            realised_pnl=_float_or_none(data.get("realised_pnl")),
-            unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
-            today_realised_pnl=_float_or_none(data.get("today_realised_pnl")),
-            week_pnl=_float_or_none(data.get("week_pnl")),
-            month_pnl=_float_or_none(data.get("month_pnl")),
+        magic_ok, magic_msg = magic_number_is_available(
+            magic_number, symbol, strategy_name
         )
+        if not magic_ok:
+            return jsonify({"error": magic_msg}), 409
+
+        fill_event = (data.get("fill_event") or "").strip() or None
+
+        _persist_ea_state_before_brain(data, symbol, strategy_name, magic_number)
 
         # Log the intraday request
         print("=" * 50)
@@ -338,6 +356,8 @@ def trading_intraday():
         print(f"Positions: {len(positions)} open")
         if strategy_name:
             print(f"Strategy: {strategy_name}")
+        if fill_event:
+            print(f"Fill event: {fill_event}")
         print("=" * 50)
 
         # Call intraday_action in brain.py
@@ -345,8 +365,8 @@ def trading_intraday():
             symbol=symbol,
             ohlc_data=ohlc_data,
             magic_number=magic_number,
-            positions=positions,
             strategy_name=strategy_name,
+            fill_event=fill_event,
         )
         
         # Return the AI analysis result directly to the EA
@@ -358,81 +378,6 @@ def trading_intraday():
         print(traceback.format_exc())
         return jsonify({
             "error": f"Internal server error: {str(e)}"
-        }), 500
-
-
-@app.route("/api/trading/snapshot", methods=["POST"])
-def trading_snapshot():
-    """
-    Main endpoint for MT5 EA to request trading analysis.
-    
-    Expected payload:
-    {
-        "symbol": "EURUSD",
-        "ohlc_data": {
-            "H1": [...],
-            "M15": [...],
-            "M5": [...],
-            "M1": [...],
-            "current_price": 1.0850,
-            "primary_timeframe": "H1"
-        },
-        "account_state": {
-            "balance": 10000.0,
-            "equity": 10000.0,
-            "drawdown": 0.0,
-            "open_positions": [...],
-            "pending_orders": [...],
-            "max_trades_per_day": 10,
-            "max_risk_per_trade": 0.02,
-            "daily_drawdown_limit": 0.05
-        },
-        "session_context": "London"  # Optional
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({"error": "No JSON data provided"}), 400
-        
-        # Validate required fields
-        symbol = data.get("symbol")
-        ohlc_data = data.get("ohlc_data")
-        account_state = data.get("account_state")
-        
-        if not symbol or not ohlc_data or not account_state:
-            return jsonify({
-                "error": "Missing required fields: symbol, ohlc_data, account_state"
-            }), 400
-        
-        # Get requested timeframes (optional - for tracking)
-        requested_timeframes = data.get("requested_timeframes", [])
-        
-        # Process trading snapshot (placeholder - will be implemented later)
-        # from brain import process_trading_snapshot
-        # result = process_trading_snapshot(
-        #     symbol=symbol,
-        #     ohlc_data=ohlc_data,
-        #     account_state=account_state,
-        #     session_context=data.get("session_context"),
-        #     requested_timeframes=requested_timeframes
-        # )
-        
-        # Placeholder response
-        result = {
-            "action": "CHECK",
-            "next_run_at_utc": None,
-            "message": "Trading snapshot processing not yet implemented"
-        }
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        return jsonify({
-            "error": f"Internal server error: {str(e)}",
-            "action": "ERROR",
-            "next_run_at_utc": None
         }), 500
 
 
@@ -487,6 +432,35 @@ def trading_status():
     }), 200
 
 
+@app.route("/api/trading/validate_magic", methods=["GET"])
+def trading_validate_magic():
+    """
+    Verify MagicNumber can be used by this chart (> 0, not already registered to another pair).
+    symbol/strategy may be shared by other magics; the same magic_number cannot be reused.
+    """
+    try:
+        magic_number, magic_err = _parse_magic_number(
+            {"magic_number": request.args.get("magic_number")}
+        )
+        if magic_err:
+            return jsonify({"success": False, "error": magic_err}), 400
+
+        symbol = (request.args.get("symbol") or "").strip().upper()
+        strategy_name = (request.args.get("strategy") or "").strip()
+        if not symbol:
+            return jsonify({"success": False, "error": "Missing query param: symbol"}), 400
+        if not strategy_name:
+            return jsonify({"success": False, "error": "Missing query param: strategy"}), 400
+
+        ok, msg = magic_number_is_available(magic_number, symbol, strategy_name)
+        if ok:
+            return jsonify({"success": True, "magic_number": magic_number}), 200
+        return jsonify({"success": False, "error": msg}), 409
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/trading/store_positions", methods=["POST"])
 def store_positions():
     """
@@ -497,7 +471,7 @@ def store_positions():
         "symbol": "GBPUSD",
         "positions": [
             {
-                "ticket": 12345,
+                "trade_id": 12345,
                 "asset": "GBPUSD",
                 "direction": "BUY",
                 "entry_price": 1.34205,
@@ -545,42 +519,6 @@ def store_positions():
         return jsonify({
             "error": f"Internal server error: {str(e)}"
         }), 500
-
-
-@app.route("/api/trading/bot_action", methods=["GET"])
-def trading_bot_action_get():
-    """
-    Return the canonical bot_action row for an EA instance (scheduling + trade payloads).
-
-    Query: magic_number (required, positive integer)
-    """
-    try:
-        magic_number, magic_err = _parse_magic_number(
-            {"magic_number": request.args.get("magic_number")}
-        )
-        if magic_err:
-            return jsonify({"error": magic_err}), 400
-
-        row = get_bot_action(magic_number)
-        wrapped = {
-            "bot_action": _bot_action_for_api(row) if row else {
-                "next_review_time": None,
-                "action_type": None,
-                "enter": None,
-                "manage": None,
-                "exit": None,
-            },
-            "monitoring_timeframes": "M5,H1",
-        }
-        flat = _flatten_for_ea(wrapped, "sod_analysis", magic_number)
-        flat.pop("sod_analysis", None)
-        return jsonify({
-            "success": True,
-            **flat,
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # =============================================================================
@@ -739,11 +677,10 @@ def not_found(error):
             "/api/health",
             "/api/trading/sod",
             "/api/trading/intraday",
-            "/api/trading/snapshot",
             "/api/trading/execute",
             "/api/trading/status",
             "/api/trading/store_positions",
-            "GET /api/trading/bot_action?magic_number=N",
+            "GET /api/trading/validate_magic?magic_number=N&symbol=X&strategy=Y",
             "/api/strategies",
             "/api/strategies/<name>",
             "PUT /api/strategies/<name>"
@@ -799,19 +736,7 @@ def _build_chat_context(
         account_ctx = get_account_context_for_analysis(magic_number)
     else:
         account_ctx = get_account_context_for_analysis(0)
-    if any(account_ctx.get(k) is not None for k in ("account_size", "realised_pnl", "unrealised_pnl", "today_realised_pnl", "week_pnl", "month_pnl")):
-        parts += [
-            "=== ACCOUNT (latest snapshot) ===",
-            "account_size: " + (str(account_ctx.get("account_size")) if account_ctx.get("account_size") is not None else "—"),
-            "realised_pnl: " + (str(account_ctx.get("realised_pnl")) if account_ctx.get("realised_pnl") is not None else "—"),
-            "today_realised_pnl: " + (str(account_ctx.get("today_realised_pnl")) if account_ctx.get("today_realised_pnl") is not None else "—"),
-            "unrealised_pnl: " + (str(account_ctx.get("unrealised_pnl")) if account_ctx.get("unrealised_pnl") is not None else "—"),
-            "week_pnl: " + (str(account_ctx.get("week_pnl")) if account_ctx.get("week_pnl") is not None else "—"),
-            "month_pnl: " + (str(account_ctx.get("month_pnl")) if account_ctx.get("month_pnl") is not None else "—"),
-            ""
-        ]
-    else:
-        parts += ["=== ACCOUNT ===", "No account snapshot yet for this magic_number.", ""]
+    parts += [format_account_snapshot_line(account_ctx), ""]
 
     # Strategy details — show name and full rules so the assistant can discuss them
     if strategy_name:
@@ -843,8 +768,14 @@ def _build_chat_context(
 
     if magic_number:
         analysis_record = get_analysis_record(magic_number, symbol, scoped_strategy)
-        sod_text = analysis_record.get("sod_analysis") if analysis_record else None
-        intraday_text = analysis_record.get("intraday_analysis") if analysis_record else None
+        sod_text = analysis_note_text(
+            analysis_record.get("sod_analysis") if analysis_record else None,
+            "sod_analysis",
+        )
+        intraday_text = analysis_note_text(
+            analysis_record.get("intraday_analysis") if analysis_record else None,
+            "intraday_analysis",
+        )
         updated_at = analysis_record.get("_db_updated_at") if analysis_record else None
 
         if sod_text:
@@ -880,14 +811,7 @@ def _build_chat_context(
         positions = get_current_positions(symbol, magic_number)
     else:
         positions = get_current_positions(symbol, 0)
-    if positions:
-        parts += [
-            "=== CURRENT OPEN POSITIONS ===",
-            json.dumps(positions, indent=2),
-            ""
-        ]
-    else:
-        parts += ["=== CURRENT OPEN POSITIONS ===", "No open positions.", ""]
+    parts += [format_positions_compact(positions), ""]
 
     if user_id:
         try:

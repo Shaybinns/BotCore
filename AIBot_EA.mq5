@@ -56,6 +56,11 @@ struct EATradingPayload
 
 EATradingPayload g_Payload;
 
+string   g_FillEventForPayload = "";
+bool     g_IntradayInProgress = false;
+string   g_PendingFillEvent = "";
+datetime g_LastFillIntradayAt = 0;
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
@@ -79,6 +84,9 @@ int OnInit()
    
    // Validate strategy against server before allowing EA to run
    if(!ValidateStrategy())
+      return(INIT_FAILED);
+
+   if(!ValidateMagicNumber())
       return(INIT_FAILED);
    
    CurrentState = STATE_INIT;
@@ -132,6 +140,43 @@ bool ValidateStrategy()
    Print("ERROR: Strategy '", StrategyName, "' not found on server.");
    Print("Use GET ", ServerURL, "/api/strategies to list available strategies.");
    Print("Use POST ", ServerURL, "/api/strategies to create a new one.");
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Validate MagicNumber is not already registered to another bot      |
+//+------------------------------------------------------------------+
+bool ValidateMagicNumber()
+{
+   Print("--- Magic Number Validation ---");
+
+   if(MagicNumber <= 0)
+   {
+      Print("ERROR: MagicNumber must be a positive integer (unique per EA instance).");
+      return false;
+   }
+
+   string url = ServerURL + "/api/trading/validate_magic";
+   url += "?magic_number=" + IntegerToString(MagicNumber);
+   url += "&symbol=" + TradingSymbol;
+   url += "&strategy=" + StrategyName;
+
+   string response = GetFromAPI(url);
+   if(StringLen(response) == 0)
+   {
+      Print("ERROR: Could not reach server for magic number validation.");
+      return false;
+   }
+
+   if(StringFind(response, "\"success\":true") >= 0)
+   {
+      Print("Magic number validated OK: ", MagicNumber);
+      return true;
+   }
+
+   Print("ERROR: Magic number validation failed on server.");
+   Print("Response: ", response);
+   Print("MagicNumber must be > 0 and unique per EA chart (symbol/strategy may repeat on other magics).");
    return false;
 }
 
@@ -278,7 +323,7 @@ void CheckReviewTime()
       Print("========================================");
       
       NextReviewTime = 0;  // Clear so RunIntraday() can write the new schedule
-      RunIntraday();
+      RunIntraday("");
       Print("DEBUG post-intraday NextReviewTime: ", NextReviewTime, " = ", TimeToString(NextReviewTime));
    }
 }
@@ -302,9 +347,6 @@ void RunSOD()
       {
          // Phase 3: Parse the response
          ParseAIResponse(response);
-         
-         // Always store positions after SOD (to sync state for the day)
-         StoreCurrentPositions();
       }
    }
    else
@@ -315,29 +357,108 @@ void RunSOD()
 
 //+------------------------------------------------------------------+
 //| Phase 7: Run Intraday Analysis                                   |
+//| fillEvent: empty = scheduled review; non-empty = broker fill sync |
 //+------------------------------------------------------------------+
-void RunIntraday()
+void RunIntraday(string fillEvent = "")
 {
-   Print("Preparing Intraday OHLC Data...");
+   if(g_IntradayInProgress)
+   {
+      Print("Intraday already in progress — skipping duplicate request");
+      return;
+   }
    
-   // Phase 5: Build dynamic OHLC based on monitoring timeframes
+   g_IntradayInProgress = true;
+   
+   if(StringLen(fillEvent) > 0)
+   {
+      Print("========================================");
+      Print("Fill-triggered intraday: ", fillEvent);
+      Print("========================================");
+   }
+   else
+   {
+      Print("Preparing Intraday OHLC Data...");
+   }
+   
+   g_FillEventForPayload = fillEvent;
    string payload = PrepareIntradayOHLCData();
+   g_FillEventForPayload = "";
    
    if(StringLen(payload) > 0)
    {
-      // Send to Intraday endpoint
       string response = SendToAPI("/api/trading/intraday", payload);
       
       if(StringLen(response) > 0)
-      {
-         // Phase 3: Parse the response (will call StoreCurrentPositions() if trade executed)
          ParseAIResponse(response);
-      }
-      }
-      else
-      {
+   }
+   else
+   {
       Print("ERROR: Failed to prepare Intraday data");
    }
+   
+   g_IntradayInProgress = false;
+   
+   if(StringLen(g_PendingFillEvent) > 0)
+   {
+      string queued = g_PendingFillEvent;
+      g_PendingFillEvent = "";
+      Print("Running queued fill intraday: ", queued);
+      RunIntraday(queued);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Broker deal added — trigger intraday to sync AI after fills        |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+   
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != TradingSymbol)
+      return;
+   
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != MagicNumber)
+      return;
+   
+   string fillEvent = "";
+   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   long reason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+   
+   if(entry == DEAL_ENTRY_IN)
+      fillEvent = "ENTRY_FILL";
+   else if(entry == DEAL_ENTRY_OUT_BY)
+      fillEvent = "PARTIAL";
+   else if(entry == DEAL_ENTRY_OUT)
+   {
+      if(reason == DEAL_REASON_SL)
+         fillEvent = "SL";
+      else if(reason == DEAL_REASON_TP)
+         fillEvent = "TP";
+      else
+         fillEvent = "EXIT";
+   }
+   else
+      return;
+   
+   if(g_IntradayInProgress)
+   {
+      g_PendingFillEvent = fillEvent;
+      Print("Fill queued during intraday: ", fillEvent);
+      return;
+   }
+   
+   datetime now = TimeCurrent();
+   if(g_LastFillIntradayAt > 0 && (now - g_LastFillIntradayAt) < 3)
+      return;
+   
+   g_LastFillIntradayAt = now;
+   RunIntraday(fillEvent);
 }
 
 //+------------------------------------------------------------------+
@@ -496,10 +617,7 @@ void ExecuteEnter(
    {
       CurrentPositionTicket = ticket;
       UpdateState(STATE_IN_TRADE);
-      Print("✅ Order placed successfully - Ticket: ", ticket);
-      
-      // Update position database after successful entry
-      StoreCurrentPositions();
+      Print("✅ Pending order placed - Ticket: ", ticket, " (intraday runs on fill)");
    }
    else
    {
@@ -559,9 +677,7 @@ void ExecuteManage(
    }
    
    UpdateState(STATE_MANAGING);
-   
-   // Update position database after successful management
-   StoreCurrentPositions();
+   Print("Manage applied — intraday runs on partial/SL/TP fill if applicable");
 }
 
 //+------------------------------------------------------------------+
@@ -593,9 +709,7 @@ void ExecuteExit(int ticket)
       Print("✅ Position closed successfully");
       CurrentPositionTicket = -1;
       UpdateState(STATE_CHECK);
-      
-      // Update position database after successful exit
-      StoreCurrentPositions();
+      Print("Exit sent — intraday runs on deal confirmation");
    }
    else
    {
@@ -1272,6 +1386,11 @@ string PrepareIntradayOHLCData()
    json += "\"week_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 7*86400, now), 2) + ",";
    json += "\"month_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 30*86400, now), 2) + ",";
    
+   if(StringLen(g_FillEventForPayload) > 0)
+   {
+      json += "\"fill_event\":\"" + g_FillEventForPayload + "\",";
+   }
+   
    // Parse monitoring timeframes and add data
    if(StringLen(MonitoringTimeframes) > 0)
    {
@@ -1343,8 +1462,9 @@ string GetCurrentPositions()
             if(count > 0) json += ",";
             
             json += "{";
-            json += "\"ticket\":" + IntegerToString(ticket) + ",";
-            json += "\"type\":\"" + (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
+            json += "\"trade_id\":" + IntegerToString(ticket) + ",";
+            json += "\"asset\":\"" + symbol + "\",";
+            json += "\"direction\":\"" + (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL") + "\",";
             json += "\"entry_price\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), 5) + ",";
             json += "\"current_price\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_CURRENT), 5) + ",";
             json += "\"stop_loss\":" + DoubleToString(PositionGetDouble(POSITION_SL), 5) + ",";
@@ -1549,66 +1669,6 @@ bool ReadJsonBool(string json, string key)
    if(StringFind(json, t) >= 0)
       return true;
    return false;
-}
-
-//+------------------------------------------------------------------+
-//| Send current positions to database via API                       |
-//+------------------------------------------------------------------+
-bool StoreCurrentPositions()
-{
-   Print("========================================");
-   Print("STORING POSITIONS TO DATABASE");
-   Print("========================================");
-   
-   // Get current positions
-   string positionsJSON = GetCurrentPositions();
-   
-   // Build payload
-   string payload = "{";
-   payload += "\"symbol\":\"" + TradingSymbol + "\",";
-   payload += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
-   payload += "\"positions\":" + positionsJSON;
-   payload += "}";
-   
-   // Send to API
-   string url = ServerURL + "/api/trading/store_positions";
-   string headers = "Content-Type: application/json\r\n";
-   char postData[];
-   char result[];
-   string resultHeaders;
-   
-   ArrayResize(postData, StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8) - 1);
-   
-   Print("📡 Sending positions to: ", url);
-   Print("Payload: ", payload);
-   
-   int httpCode = WebRequest(
-      "POST",
-      url,
-      headers,
-      5000,
-      postData,
-      result,
-      resultHeaders
-   );
-   
-   if(httpCode == 200)
-   {
-      string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-      Print("✅ Positions stored successfully");
-      Print("Response: ", response);
-      return true;
-   }
-   else
-   {
-      Print("❌ Failed to store positions - HTTP Code: ", httpCode);
-      if(ArraySize(result) > 0)
-      {
-         string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-         Print("Error response: ", response);
-      }
-      return false;
-   }
 }
 
 //+------------------------------------------------------------------+

@@ -1,9 +1,8 @@
 """
 Database Layer - PostgreSQL Integration
 
-8 tables:
-  analysis_notes    — per EA (magic_number + symbol + strategy): sod_analysis, intraday_analysis
-  bot_action        — per EA (magic_number): next_review_time, action_type, enter/manage/exit payloads
+7 tables:
+  analysis_notes    — one row per magic_number (EA instance); full run JSON per sod/intraday
   market_data_cache — global synthesized market intelligence (morning brief)
   current_positions — live MT5 positions, fully replaced on each EA update
   trade_events      — append-only audit log of EA execution confirmations
@@ -70,6 +69,39 @@ def init_database():
         )
     """)
 
+    # One row per EA instance — magic_number is the only unique identity.
+    cursor.execute("""
+        DELETE FROM analysis_notes a
+        USING analysis_notes b
+        WHERE a.magic_number = b.magic_number
+          AND a.magic_number > 0
+          AND a.id < b.id
+    """)
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'analysis_notes_magic_number_symbol_strategy_name_key'
+            ) THEN
+                ALTER TABLE analysis_notes
+                    DROP CONSTRAINT analysis_notes_magic_number_symbol_strategy_name_key;
+            END IF;
+        END $$
+    """)
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'analysis_notes_magic_number_key'
+            ) THEN
+                ALTER TABLE analysis_notes
+                    ADD CONSTRAINT analysis_notes_magic_number_key UNIQUE (magic_number);
+            END IF;
+        END $$
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS market_data_cache (
             id          SERIAL PRIMARY KEY,
@@ -78,91 +110,14 @@ def init_database():
         )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bot_action (
-            id                SERIAL PRIMARY KEY,
-            magic_number      BIGINT       NOT NULL UNIQUE,
-            next_review_time  VARCHAR(32),
-            action_type       VARCHAR(10),
-            enter             JSONB,
-            manage            JSONB,
-            exit_action       JSONB,
-            created_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Migrate legacy bot_action columns if present.
-    cursor.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'next_run_time'
-            ) THEN
-                ALTER TABLE bot_action RENAME COLUMN next_run_time TO next_review_time;
-            END IF;
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'enter_trade'
-            ) AND NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'enter'
-            ) THEN
-                ALTER TABLE bot_action RENAME COLUMN enter_trade TO enter;
-            END IF;
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'manage_trade'
-            ) AND NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'manage'
-            ) THEN
-                ALTER TABLE bot_action RENAME COLUMN manage_trade TO manage;
-            END IF;
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'exit_trade'
-            ) AND NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'exit_action'
-            ) THEN
-                ALTER TABLE bot_action RENAME COLUMN exit_trade TO exit_action;
-            ELSIF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'exit'
-            ) AND NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'bot_action'
-                  AND column_name = 'exit_action'
-            ) THEN
-                ALTER TABLE bot_action RENAME COLUMN exit TO exit_action;
-            END IF;
-        END $$
-    """)
-    cursor.execute("""
-        ALTER TABLE bot_action
-            ADD COLUMN IF NOT EXISTS next_review_time VARCHAR(32),
-            ADD COLUMN IF NOT EXISTS action_type VARCHAR(10),
-            ADD COLUMN IF NOT EXISTS enter JSONB,
-            ADD COLUMN IF NOT EXISTS manage JSONB,
-            ADD COLUMN IF NOT EXISTS exit_action JSONB
-    """)
+    cursor.execute("DROP TABLE IF EXISTS bot_action CASCADE")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS current_positions (
             id            SERIAL PRIMARY KEY,
             magic_number  BIGINT          NOT NULL DEFAULT 0,
             symbol        VARCHAR(20)     NOT NULL,
-            ticket        BIGINT          NOT NULL,
+            trade_id      BIGINT          NOT NULL,
             asset         VARCHAR(20)     NOT NULL,
             direction     VARCHAR(10)     NOT NULL,
             entry_price   DECIMAL(18, 5)  NOT NULL,
@@ -172,16 +127,52 @@ def init_database():
             lot_size      DECIMAL(10, 2)  NOT NULL,
             entry_time    TIMESTAMP WITH TIME ZONE NOT NULL,
             updated_at    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(magic_number, symbol, ticket)
+            UNIQUE(magic_number, symbol, trade_id)
         )
     """)
     cursor.execute("""
         ALTER TABLE current_positions
             ADD COLUMN IF NOT EXISTS magic_number BIGINT NOT NULL DEFAULT 0
     """)
+    # Legacy installs: ticket → trade_id
     cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_current_positions_magic_symbol_ticket
-            ON current_positions(magic_number, symbol, ticket)
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'current_positions'
+                  AND column_name = 'ticket'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'current_positions'
+                  AND column_name = 'trade_id'
+            ) THEN
+                ALTER TABLE current_positions RENAME COLUMN ticket TO trade_id;
+            END IF;
+        END $$
+    """)
+    cursor.execute("""
+        ALTER TABLE current_positions DROP CONSTRAINT IF EXISTS current_positions_magic_number_symbol_ticket_key
+    """)
+    cursor.execute("""
+        DROP INDEX IF EXISTS idx_current_positions_magic_symbol_ticket
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_current_positions_magic_symbol_trade_id
+            ON current_positions(magic_number, symbol, trade_id)
+    """)
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'current_positions_magic_number_symbol_trade_id_key'
+            ) THEN
+                ALTER TABLE current_positions
+                    ADD CONSTRAINT current_positions_magic_number_symbol_trade_id_key
+                    UNIQUE (magic_number, symbol, trade_id);
+            END IF;
+        END $$
     """)
 
     cursor.execute("""
@@ -330,9 +321,6 @@ def init_database():
         "CREATE INDEX IF NOT EXISTS idx_analysis_notes_lookup "
         "ON analysis_notes(magic_number, symbol, strategy_name)"
     )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_bot_action_magic ON bot_action(magic_number)"
-    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_current_positions_symbol ON current_positions(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_symbol ON trade_events(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
@@ -346,23 +334,23 @@ def init_database():
 
 # =============================================================================
 # ANALYSIS NOTES
-# One row per (magic_number, symbol, strategy_name).
+# One row per magic_number (EA instance). symbol/strategy are metadata only.
 # =============================================================================
 
 def get_analysis_record(
     magic_number: int,
-    symbol: str,
+    symbol: str = '',
     strategy_name: str = '',
 ) -> Optional[Dict[str, Any]]:
-    """Load sod_analysis and intraday_analysis for an EA instance."""
+    """Load sod_analysis and intraday_analysis for an EA instance (by magic_number)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT sod_analysis, intraday_analysis, created_at, updated_at
+            SELECT symbol, strategy_name, sod_analysis, intraday_analysis, created_at, updated_at
             FROM analysis_notes
-            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
-        """, (magic_number, symbol, strategy_name or ''))
+            WHERE magic_number = %s
+        """, (magic_number,))
         row = cursor.fetchone()
         cursor.close()
         conn.close()
@@ -372,12 +360,12 @@ def get_analysis_record(
 
         return {
             "magic_number": magic_number,
-            "symbol": symbol,
-            "strategy_name": strategy_name or '',
-            "sod_analysis": row[0],
-            "intraday_analysis": row[1],
-            "_db_created_at": row[2].isoformat() if row[2] else None,
-            "_db_updated_at": row[3].isoformat() if row[3] else None,
+            "symbol": row[0],
+            "strategy_name": row[1] or '',
+            "sod_analysis": row[2],
+            "intraday_analysis": row[3],
+            "_db_created_at": row[4].isoformat() if row[4] else None,
+            "_db_updated_at": row[5].isoformat() if row[5] else None,
         }
 
     except Exception as e:
@@ -399,7 +387,9 @@ def save_sod_analysis(
             INSERT INTO analysis_notes
                 (magic_number, symbol, strategy_name, sod_analysis, intraday_analysis, updated_at)
             VALUES (%s, %s, %s, %s, NULL, CURRENT_TIMESTAMP)
-            ON CONFLICT (magic_number, symbol, strategy_name) DO UPDATE SET
+            ON CONFLICT (magic_number) DO UPDATE SET
+                symbol            = EXCLUDED.symbol,
+                strategy_name     = EXCLUDED.strategy_name,
                 sod_analysis      = EXCLUDED.sod_analysis,
                 intraday_analysis = NULL,
                 updated_at        = CURRENT_TIMESTAMP
@@ -428,7 +418,9 @@ def save_intraday_analysis(
             INSERT INTO analysis_notes
                 (magic_number, symbol, strategy_name, intraday_analysis, updated_at)
             VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (magic_number, symbol, strategy_name) DO UPDATE SET
+            ON CONFLICT (magic_number) DO UPDATE SET
+                symbol            = EXCLUDED.symbol,
+                strategy_name     = EXCLUDED.strategy_name,
                 intraday_analysis = EXCLUDED.intraday_analysis,
                 updated_at        = CURRENT_TIMESTAMP
         """, (magic_number, symbol, strategy_name or '', intraday_analysis))
@@ -454,8 +446,8 @@ def clear_intraday_analysis(
         cursor.execute("""
             UPDATE analysis_notes
             SET intraday_analysis = NULL, updated_at = CURRENT_TIMESTAMP
-            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
-        """, (magic_number, symbol, strategy_name or ''))
+            WHERE magic_number = %s
+        """, (magic_number,))
         conn.commit()
         cursor.close()
         conn.close()
@@ -519,19 +511,34 @@ def save_market_data_cache(data: Dict[str, Any]) -> bool:
 
 
 # =============================================================================
-# BOT ACTION
-# One row per magic_number — scheduling and trade execution payloads for the EA.
+# MAGIC NUMBER (EA instance identity)
 # =============================================================================
 
-def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
-    """Load bot_action row for an EA magic number."""
+def magic_number_is_available(
+    magic_number: int,
+    symbol: str = "",
+    strategy_name: str = "",
+) -> tuple[bool, str]:
+    """
+    magic_number is the globally unique EA instance id (must be > 0).
+    Other magics may use the same symbol/strategy; the same magic_number cannot
+    be claimed by a different symbol/strategy pair once registered in analysis_notes.
+    Re-attaching the same chart (same magic + symbol + strategy) is allowed.
+    """
+    if magic_number <= 0:
+        return False, (
+            "magic_number must be a positive integer (> 0). "
+            "Set a unique MagicNumber per EA chart in MT5 inputs."
+        )
+
+    sym = (symbol or "").strip().upper()
+    strat = (strategy_name or "").strip()
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT magic_number, next_review_time, action_type, enter, manage, exit_action,
-                   created_at, updated_at
-            FROM bot_action
+            SELECT symbol, strategy_name
+            FROM analysis_notes
             WHERE magic_number = %s
         """, (magic_number,))
         row = cursor.fetchone()
@@ -539,63 +546,21 @@ def get_bot_action(magic_number: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
         if not row:
-            return None
+            return True, ""
 
-        return {
-            "magic_number": int(row[0]),
-            "next_review_time": row[1],
-            "action_type": row[2],
-            "enter": row[3],
-            "manage": row[4],
-            "exit": row[5],  # API key; DB column is exit_action
-            "_db_created_at": row[6].isoformat() if row[6] else None,
-            "_db_updated_at": row[7].isoformat() if row[7] else None,
-        }
+        row_sym = (row[0] or "").strip().upper()
+        row_strat = (row[1] or "").strip()
+        if row_sym == sym and row_strat == strat:
+            return True, ""
 
-    except Exception as e:
-        print(f"[db] get_bot_action error: {e}")
-        return None
-
-
-def save_bot_action(
-    magic_number: int,
-    next_review_time: Optional[str],
-    action_type: Optional[str] = None,
-    enter: Optional[Dict[str, Any]] = None,
-    manage: Optional[Dict[str, Any]] = None,
-    exit: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """Upsert bot_action for an EA magic number (full replace each run)."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO bot_action
-                (magic_number, next_review_time, action_type, enter, manage, exit_action, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (magic_number) DO UPDATE SET
-                next_review_time = EXCLUDED.next_review_time,
-                action_type      = EXCLUDED.action_type,
-                enter            = EXCLUDED.enter,
-                manage           = EXCLUDED.manage,
-                exit_action      = EXCLUDED.exit_action,
-                updated_at       = CURRENT_TIMESTAMP
-        """, (
-            magic_number,
-            next_review_time,
-            action_type,
-            json.dumps(enter) if enter is not None else None,
-            json.dumps(manage) if manage is not None else None,
-            json.dumps(exit) if exit is not None else None,
-        ))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
+        return False, (
+            f"Magic number {magic_number} is already registered on the server "
+            f"({row_sym} / {row_strat}). Use a different MagicNumber for this chart."
+        )
 
     except Exception as e:
-        print(f"[db] save_bot_action error: {e}")
-        return False
+        print(f"[db] magic_number_is_available error: {e}")
+        return False, str(e)
 
 
 # =============================================================================
@@ -683,27 +648,6 @@ def save_test_run(
         return False
 
 
-def clear_bot_action_trades(magic_number: int) -> bool:
-    """Clear trade payloads after EA execution; keeps next_review_time."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE bot_action
-            SET action_type = NULL, enter = NULL, manage = NULL, exit_action = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE magic_number = %s
-        """, (magic_number,))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-
-    except Exception as e:
-        print(f"[db] clear_bot_action_trades error: {e}")
-        return False
-
-
 # =============================================================================
 # LEGACY COMPATIBILITY (brain.py / api_server.py until SOD rework is wired)
 # magic_number defaults to 0 when callers do not pass it yet.
@@ -778,12 +722,56 @@ def clear_analysis_notes(symbol: str, note_types: List[str], strategy_name: str 
 # Fully replaced on every EA update — always reflects live MT5 state.
 # =============================================================================
 
+def _entry_time_for_db(raw: Any) -> Any:
+    """Accept ISO string or Unix seconds from EA payloads."""
+    if raw is None:
+        return datetime.now(timezone.utc)
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+    if isinstance(raw, str) and raw.isdigit():
+        return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+    return raw
+
+
+def normalize_positions_for_storage(
+    positions: List[Dict[str, Any]],
+    symbol: str,
+) -> List[Dict[str, Any]]:
+    """Map EA/legacy field names to DB rows (trade_id, direction, asset)."""
+    out: List[Dict[str, Any]] = []
+    for raw in positions or []:
+        if not isinstance(raw, dict):
+            continue
+        trade_id = raw.get("trade_id") if raw.get("trade_id") is not None else raw.get("ticket")
+        if trade_id is None:
+            continue
+        direction = (raw.get("direction") or raw.get("type") or "").strip().upper()
+        if not direction:
+            continue
+        asset = (raw.get("asset") or symbol or "").strip()
+        if not asset:
+            continue
+        out.append({
+            "trade_id": int(trade_id),
+            "asset": asset,
+            "direction": direction,
+            "entry_price": raw.get("entry_price"),
+            "current_price": raw.get("current_price"),
+            "stop_loss": raw.get("stop_loss"),
+            "take_profit": raw.get("take_profit"),
+            "lot_size": raw.get("lot_size"),
+            "entry_time": _entry_time_for_db(raw.get("entry_time")),
+        })
+    return out
+
+
 def store_current_positions(
     symbol: str,
     positions: List[Dict[str, Any]],
     magic_number: int,
 ) -> bool:
     """Replace all positions for an EA instance (magic_number + symbol)."""
+    normalized = normalize_positions_for_storage(positions, symbol)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -793,30 +781,30 @@ def store_current_positions(
             (symbol, magic_number),
         )
 
-        for pos in positions:
+        for pos in normalized:
             cursor.execute("""
                 INSERT INTO current_positions
-                (magic_number, symbol, ticket, asset, direction, entry_price, current_price,
+                (magic_number, symbol, trade_id, asset, direction, entry_price, current_price,
                  stop_loss, take_profit, lot_size, entry_time, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             """, (
                 magic_number,
                 symbol,
-                pos.get("ticket"),
-                pos.get("asset"),
-                pos.get("direction"),
+                pos["trade_id"],
+                pos["asset"],
+                pos["direction"],
                 pos.get("entry_price"),
                 pos.get("current_price"),
                 pos.get("stop_loss"),
                 pos.get("take_profit"),
                 pos.get("lot_size"),
-                pos.get("entry_time")
+                pos.get("entry_time"),
             ))
 
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"[db] Stored {len(positions)} position(s) for {symbol}")
+        print(f"[db] Stored {len(normalized)} position(s) for {symbol}")
         return True
 
     except Exception as e:
@@ -830,7 +818,7 @@ def get_current_positions(symbol: str, magic_number: int) -> List[Dict[str, Any]
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT ticket, asset, direction, entry_price, current_price,
+            SELECT trade_id, asset, direction, entry_price, current_price,
                    stop_loss, take_profit, lot_size, entry_time, updated_at
             FROM current_positions
             WHERE symbol = %s AND magic_number = %s
@@ -841,7 +829,7 @@ def get_current_positions(symbol: str, magic_number: int) -> List[Dict[str, Any]
         conn.close()
 
         return [{
-            "ticket":        int(row[0]),
+            "trade_id":      int(row[0]),
             "asset":         row[1],
             "direction":     row[2],
             "entry_price":   float(row[3]),
@@ -850,7 +838,6 @@ def get_current_positions(symbol: str, magic_number: int) -> List[Dict[str, Any]
             "take_profit":   float(row[6]) if row[6] else None,
             "lot_size":      float(row[7]),
             "entry_time":    row[8].isoformat() if row[8] else None,
-            "_db_updated_at": row[9].isoformat() if row[9] else None
         } for row in results]
 
     except Exception as e:

@@ -23,8 +23,6 @@ from database import (
     save_market_data_cache,
     save_sod_analysis,
     save_intraday_analysis,
-    save_bot_action,
-    get_bot_action,
     save_test_run,
     get_current_positions,
     get_strategy,
@@ -46,14 +44,29 @@ def _london_time_str() -> str:
     return now_london.strftime(f"%Y-%m-%d %H:%M {abbr} (UTC{offset_h:+d})")
 
 
-def _strategy_mandate_lines(strategy_name: Optional[str]) -> List[str]:
-    """Opening lines for the trading user prompt: bind decisions to the system strategy block."""
+def _require_strategy_prompt(strategy_name: Optional[str]) -> str:
+    """Load strategy prompt from DB; required for every SOD/intraday run."""
     name = (strategy_name or "").strip()
-    name_line = f"Strategy name for this run: {name}" if name else "Strategy name for this run: (none — follow any ACTIVE TRADING STRATEGY in the system message.)"
+    if not name:
+        raise ValueError(
+            "Missing required strategy. All analysis runs must be linked to a named strategy."
+        )
+    record = get_strategy(name)
+    if not record or not (record.get("strategy_prompt") or "").strip():
+        raise ValueError(
+            f"Strategy '{name}' not found in database. "
+            "Use GET /api/strategies or POST /api/strategies to register it."
+        )
+    return record["strategy_prompt"].strip()
+
+
+def _strategy_mandate_lines(strategy_name: str) -> List[str]:
+    """Opening lines for the trading user prompt: bind decisions to the system strategy block."""
+    name_line = f"Strategy name for this run: {strategy_name.strip()}"
     return [
         "=== STRATEGY MANDATE (READ FIRST) ===",
-        "All analysis and trading decisions in this response must follow the ACTIVE TRADING STRATEGY in your "
-        "system message: setup rules, invalidation, risk, session logic, and CHECK vs ENTER / MANAGE / EXIT. "
+        "All analysis and trading decisions in your output must follow the ACTIVE TRADING STRATEGY in your "
+        "system message: setup rules, invalidation, risk, session logic, and action: null / ENTER / MANAGE / EXIT. "
         "Ground every conclusion in that strategy; do not substitute a different methodology or contradict it.",
         name_line,
         "",
@@ -86,23 +99,48 @@ def _london_morning_brief_note_valid_for_sod(cached: Optional[Dict[str, Any]]) -
         return False
 
 
+_CHART_TF_ALLOWED = frozenset({"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"})
+
+
+def _normalize_chart_timeframe_code(raw: str) -> Optional[str]:
+    """Map EA OHLC key or MT5 code to chart-img timeframe (H1, H4, …)."""
+    tf = str(raw or "").strip().upper().replace("_DATA", "")
+    aliases = {
+        "1H": "H1", "4H": "H4", "1D": "D1", "1W": "W1",
+        "5M": "M5", "15M": "M15", "30M": "M30",
+    }
+    tf = aliases.get(tf, tf)
+    return tf if tf in _CHART_TF_ALLOWED else None
+
+
 def _chart_timeframes_from_ohlc_keys(ohlc_data: Dict[str, Any]) -> List[str]:
     """Map EA OHLC keys (e.g. M5_DATA, H1_DATA) to chart-img timeframe codes."""
-    key_to_tf = {
-        "4H_DATA": "H4", "H4_DATA": "H4",
-        "1D_DATA": "D1", "D1_DATA": "D1",
-        "H1_DATA": "H1", "1H_DATA": "H1",
-        "M15_DATA": "M15", "M5_DATA": "M5", "M1_DATA": "M1",
-        "M30_DATA": "M30", "W1_DATA": "W1", "1W_DATA": "W1",
-    }
     out: List[str] = []
-    for key in list(ohlc_data.keys())[:4]:
-        tf = key_to_tf.get(key.upper()) or key.upper().replace("_DATA", "")
-        if tf == "4H":
-            tf = "H4"
+    for key in sorted(ohlc_data.keys()):
+        tf = _normalize_chart_timeframe_code(key)
         if tf and tf not in out:
             out.append(tf)
+        if len(out) >= 4:
+            break
     return out
+
+
+def analysis_note_text(stored: Optional[str], analysis_key: str) -> Optional[str]:
+    """Extract analysis prose from stored JSON (or return legacy plain text)."""
+    if not stored:
+        return None
+    text = stored.strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            val = data.get(analysis_key)
+            if val is not None:
+                return str(val).strip() or None
+    except json.JSONDecodeError:
+        pass
+    return text
 
 
 def _chart_block_for_context(chart_observations: Any) -> str:
@@ -112,33 +150,45 @@ def _chart_block_for_context(chart_observations: Any) -> str:
     return json.dumps(chart_observations, indent=2)
 
 
-def _user_run_instructions(run: str, analysis_key: str) -> List[str]:
+def _user_run_instructions(
+    run: str,
+    analysis_key: str,
+    fill_event: Optional[str] = None,
+) -> List[str]:
     """
     Opening block for user_prompt: task instructions first, then context is appended after.
     run: "sod" | "intraday"
     """
     if run == "sod":
         analysis_line = (
-            "A 3–5 sentence, comprehensive Start of Day analysis that sets the bias "
+            "A 3–5 sentence, comprehensive Start of Day analysis that sets your bias "
             "and trading plan for the full day ahead."
+        )
+    elif fill_event:
+        analysis_line = (
+            f"A 3–5 sentence intraday analysis. This run was triggered by a confirmed broker event: {fill_event}. "
+            "Sentence 1 MUST acknowledge that the execution worked (e.g. your entry is live, the position closed, "
+            "SL/TP hit, or a partial close completed)—then thread from your SOD and prior intraday notes as usual. "
+            "Continue with current market read, what you watch next, and whether you are placing or managing positions."
         )
     else:
         analysis_line = (
-            "A 3–5 sentence intraday analysis. Sentence 1 MUST thread from context: "
-            "if LAST INTRADAY ANALYSIS is present, coupled with the SOD plan, state whether you continue, adjust, or "
-            "invalidate that view and what changed; if only SOD is present (first intraday), "
-            "state how you are carrying the SOD plan into this check. Then: current read of the markets, "
-            "your trading today per the strategy, what you watch, what would change your view and ofcourse if you are placing any trades or managing positions."
+            "A 3–5 sentence intraday analysis. Sentence 1 MUST synthesise your previous analyses, "
+            "comparing your current analysis to that of your SOD analysis, and intraday analysis (if available), continuing on or invalidating the previous analyses and your trail of thought so far based on your strategy, "
+            "allowing enough context for your future self, in your next intraday run, to understand the decision making flow to where you are now. "
+            "Then you must continue by giving your current analysis based on your strategy, continuing from previous, if you are closer to an entry, what you are looking for and what could come next. "
+            "Your trading today per the strategy, what you watch, what would change your view, and whether you are placing or managing positions."
         )
 
     return [
         "=== YOUR TASK (READ FIRST) ===",
         "You must now run your analysis using all context information provided below.",
-        "You must output valid JSON only with exactly four top-level fields:",
+        "Your analysis will be based on your strategy provided, and you will be outputting your analysis, your next review time, your monitoring timeframes at next review time, and the execution details for any trades you will be placing or managing. As your output will dictate what is traded.",
+        "You must output valid JSON per your system prompt, only with exactly four top-level fields:",
         f'1. "{analysis_key}" — {analysis_line}',
         "2. next_review_time — when you will analyse the market again (London local time, no Z); must match what the strategy needs you to see next.",
-        '3. monitoring_timeframes — JSON array of MT5 codes for intraday OHLC/charts (e.g. ["M5", "H1"]); only timeframes your strategy requires; state in analysis what you look for on each.',
-        "4. executions — execution details (if any) when placing or managing a trade:",
+        '3. monitoring_timeframes — JSON array of MT5 chart codes for the timeframes you will be analysing at your next review time (e.g. ["M5", "H1"]); only timeframes your strategy requires.',
+        "4. executions — execution details (if any) for when you are placing or managing a trade:",
         '   { "action_type": "ENTER" | "MANAGE" | "EXIT" | null, "enter": {...}, "manage": {...}, "exit": {...} }',
         "   When action_type is null, omit enter/manage/exit sub-objects.",
         "",
@@ -146,8 +196,6 @@ def _user_run_instructions(run: str, analysis_key: str) -> List[str]:
         "Your analysis, monitoring_timeframes, next_review_time, and executions must all align with the strategy and with each other.",
         "Capital preservation comes first — but do not hesitate to place a trade precisely "
         "when conditions fully adhere to your strategy.",
-        "",
-        "=== CONTEXT (USE FOR YOUR ANALYSIS) ===",
         "",
     ]
 
@@ -250,79 +298,129 @@ def _build_bot_action_payload(
     symbol: str,
 ) -> Dict[str, Any]:
     """
-    Map model executions (+ legacy shapes) to the canonical bot_action object for the EA.
+    Map executions block from model JSON to the canonical payload for the EA.
+    Shape must match prompt.py: executions.action_type + enter | manage | exit.
     """
     executions = parsed.get("executions")
     if not isinstance(executions, dict):
-        legacy = (parsed.get("decision") or {}).get("action") or parsed.get("action")
-        executions = {"action_type": legacy}
+        executions = {}
 
     action_type = _normalize_action_type(executions.get("action_type"))
-
-    raw_next = (
-        parsed.get("next_review_time")
-        or (parsed.get("decision") or {}).get("next_review_time")
-        or executions.get("next_review_time")
-    )
-    next_review_time = _parse_next_review_time(raw_next)
+    next_review_time = _parse_next_review_time(parsed.get("next_review_time"))
 
     enter = manage = exit_payload = None
 
     if action_type == "ENTER":
-        src = executions.get("enter") if isinstance(executions.get("enter"), dict) else executions
-        legacy = parsed.get("enter_order") or {}
-        direction = (
-            src.get("direction")
-            or src.get("order_type")
-            or legacy.get("order_type")
-            or ""
-        )
-        direction = str(direction).strip().upper()
-        if direction not in ("BUY", "SELL"):
-            direction = "BUY" if direction.startswith("B") else "SELL" if direction.startswith("S") else ""
+        src = executions.get("enter")
+        if not isinstance(src, dict):
+            src = {}
+        direction = str(src.get("direction", "")).strip().upper()
         enter = {
-            "symbol": (src.get("symbol") or legacy.get("asset") or symbol or "").upper(),
+            "symbol": (src.get("symbol") or symbol or "").upper(),
             "direction": direction,
-            "entry_price": _float_or_none(src.get("entry_price") if "entry_price" in src else legacy.get("entry_price")),
-            "stop_loss": _float_or_none(src.get("stop_loss") if "stop_loss" in src else legacy.get("stop_loss")),
-            "take_profit": _float_or_none(src.get("take_profit") if "take_profit" in src else legacy.get("take_profit")),
-            "risk_percentage": _float_or_none(src.get("risk_percentage") or legacy.get("risk_percentage")),
+            "entry_price": _float_or_none(src.get("entry_price")),
+            "stop_loss": _float_or_none(src.get("stop_loss")),
+            "take_profit": _float_or_none(src.get("take_profit")),
+            "risk_percentage": _float_or_none(src.get("risk_percentage")) or 0.01,
         }
 
     elif action_type == "MANAGE":
-        src = executions.get("manage") if isinstance(executions.get("manage"), dict) else executions
-        legacy = parsed.get("manage_order") or {}
-        trade_id = src.get("trade_id") or src.get("ticket") or legacy.get("ticket")
+        src = executions.get("manage")
+        if not isinstance(src, dict):
+            src = {}
+        trade_id = src.get("trade_id")
         manage = {
             "trade_id": int(trade_id) if trade_id is not None else None,
-            "new_stop_loss": _float_or_none(
-                src.get("new_stop_loss") or src.get("update_stop_loss") or legacy.get("update_stop_loss")
-            ),
-            "new_take_profit": _float_or_none(
-                src.get("new_take_profit") or src.get("update_take_profit") or legacy.get("update_take_profit")
-            ),
-            "new_position_percentage": _float_or_none(
-                src.get("new_position_percentage")
-                or src.get("partial_close_percentage")
-                or legacy.get("partial_close_percentage")
-            ),
+            "new_stop_loss": _float_or_none(src.get("new_stop_loss")),
+            "new_take_profit": _float_or_none(src.get("new_take_profit")),
+            "new_position_percentage": _float_or_none(src.get("new_position_percentage")),
         }
 
     elif action_type == "EXIT":
-        src = executions.get("exit") if isinstance(executions.get("exit"), dict) else executions
-        legacy = parsed.get("exit_order") or {}
-        trade_id = src.get("trade_id") or src.get("ticket") or legacy.get("ticket")
+        src = executions.get("exit")
+        if not isinstance(src, dict):
+            src = {}
+        trade_id = src.get("trade_id")
         exit_payload = {
             "trade_id": int(trade_id) if trade_id is not None else None,
         }
 
-    return {
+    bot_action = {
         "next_review_time": next_review_time,
         "action_type": action_type,
         "enter": enter,
         "manage": manage,
         "exit": exit_payload,
     }
+    return _apply_execution_validation(bot_action)
+
+
+def _apply_execution_validation(bot_action: Dict[str, Any]) -> Dict[str, Any]:
+    """Server-side checks aligned with prompt rules and EA constraints."""
+    action_type = bot_action.get("action_type")
+
+    if action_type == "ENTER":
+        ent = bot_action.get("enter") or {}
+        sl = ent.get("stop_loss")
+        tp = ent.get("take_profit")
+        ep = ent.get("entry_price")
+        direction = ent.get("direction")
+        if direction not in ("BUY", "SELL"):
+            print("[brain] REJECTED ENTER: direction must be BUY or SELL")
+            bot_action["action_type"] = None
+            bot_action["enter"] = None
+        elif sl is None or tp is None:
+            print("[brain] REJECTED ENTER: stop_loss and take_profit are required")
+            bot_action["action_type"] = None
+            bot_action["enter"] = None
+        elif _float_or_none(sl) is None or _float_or_none(sl) <= 0:
+            print("[brain] REJECTED ENTER: invalid stop_loss")
+            bot_action["action_type"] = None
+            bot_action["enter"] = None
+        elif _float_or_none(tp) is None or _float_or_none(tp) <= 0:
+            print("[brain] REJECTED ENTER: invalid take_profit")
+            bot_action["action_type"] = None
+            bot_action["enter"] = None
+        elif _float_or_none(ep) is None or _float_or_none(ep) <= 0:
+            print("[brain] REJECTED ENTER: invalid entry_price")
+            bot_action["action_type"] = None
+            bot_action["enter"] = None
+
+    elif action_type == "MANAGE":
+        mg = bot_action.get("manage") or {}
+        if not mg.get("trade_id"):
+            print("[brain] REJECTED MANAGE: trade_id required")
+            bot_action["action_type"] = None
+            bot_action["manage"] = None
+
+    elif action_type == "EXIT":
+        ex = bot_action.get("exit") or {}
+        if not ex.get("trade_id"):
+            print("[brain] REJECTED EXIT: trade_id required")
+            bot_action["action_type"] = None
+            bot_action["exit"] = None
+
+    return bot_action
+
+
+def _build_run_record_json(
+    normalized: Dict[str, Any],
+    analysis_key: str,
+) -> str:
+    """Persist full model run JSON (analysis + scheduling + executions) for chat/history."""
+    ba = normalized.get("bot_action") or {}
+    doc = {
+        analysis_key: normalized.get(analysis_key, ""),
+        "next_review_time": ba.get("next_review_time"),
+        "monitoring_timeframes": normalized.get("monitoring_timeframes"),
+        "executions": {
+            "action_type": ba.get("action_type"),
+            "enter": ba.get("enter"),
+            "manage": ba.get("manage"),
+            "exit": ba.get("exit"),
+        },
+    }
+    return json.dumps(doc, ensure_ascii=False)
 
 
 def _flatten_for_ea(
@@ -364,25 +462,6 @@ def _flatten_for_ea(
     }
 
 
-def _bot_action_for_api(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Strip DB metadata keys for EA/API consumption."""
-    if not row:
-        return {
-            "next_review_time": None,
-            "action_type": None,
-            "enter": None,
-            "manage": None,
-            "exit": None,
-        }
-    return {
-        "next_review_time": row.get("next_review_time"),
-        "action_type": row.get("action_type"),
-        "enter": row.get("enter"),
-        "manage": row.get("manage"),
-        "exit": row.get("exit"),
-    }
-
-
 def _record_test_run(
     magic_number: int,
     run_type: str,
@@ -418,25 +497,13 @@ def _persist_trading_run(
     symbol: str,
     strategy_name: str,
     analysis_key: str,
-    analysis_text: str,
-    bot_action: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Save analysis_notes + bot_action; return canonical bot_action for the EA."""
+    stored_json: str,
+) -> None:
+    """Save full run JSON to analysis_notes (executions live in API response only)."""
     if analysis_key == "sod_analysis":
-        save_sod_analysis(magic_number, symbol, strategy_name, analysis_text)
+        save_sod_analysis(magic_number, symbol, strategy_name, stored_json)
     else:
-        save_intraday_analysis(magic_number, symbol, strategy_name, analysis_text)
-
-    save_bot_action(
-        magic_number,
-        next_review_time=bot_action.get("next_review_time"),
-        action_type=bot_action.get("action_type"),
-        enter=bot_action.get("enter"),
-        manage=bot_action.get("manage"),
-        exit=bot_action.get("exit"),
-    )
-    saved = get_bot_action(magic_number)
-    return _bot_action_for_api(saved)
+        save_intraday_analysis(magic_number, symbol, strategy_name, stored_json)
 
 
 def _normalize_trading_response(
@@ -444,66 +511,215 @@ def _normalize_trading_response(
     analysis_key: str,
     symbol: str,
 ) -> Dict[str, Any]:
-    """Map model output to analysis text + canonical bot_action for the EA."""
+    """Map model JSON (four top-level fields) to analysis text + execution payload for the EA."""
     analysis_text = parsed.get(analysis_key)
     if analysis_text is None:
-        decision = parsed.get("decision") or {}
-        analysis_text = (
-            decision.get("summary")
-            or decision.get("explanation")
-            or parsed.get("sod_analysis")
-            or parsed.get("intraday_analysis")
-            or ""
-        )
+        print(f"[brain] WARNING: missing {analysis_key} in model output")
+        analysis_text = ""
     if isinstance(analysis_text, dict):
         analysis_text = json.dumps(analysis_text)
     analysis_text = str(analysis_text).strip()
 
     bot_action = _build_bot_action_payload(parsed, symbol)
 
-    mtf_raw = (
-        parsed.get("monitoring_timeframes")
-        or (parsed.get("decision") or {}).get("monitoring_timeframes")
-    )
-
     return {
         analysis_key: analysis_text,
         "bot_action": bot_action,
-        "monitoring_timeframes": _parse_monitoring_timeframes(mtf_raw),
+        "monitoring_timeframes": _parse_monitoring_timeframes(
+            parsed.get("monitoring_timeframes")
+        ),
     }
 
 
-def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
-    """Append latest account snapshot (one row per magic_number + symbol + strategy)."""
-    has_values = any(
-        account_ctx.get(k) is not None
-        for k in (
-            "account_size", "realised_pnl", "unrealised_pnl",
-            "today_realised_pnl", "week_pnl", "month_pnl",
-        )
-    )
-    lines = ["=== ACCOUNT (latest snapshot) ==="]
-    if account_ctx.get("snapshot_at"):
-        lines.append(f"snapshot_at: {account_ctx['snapshot_at']}")
-    if account_ctx.get("symbol"):
-        lines.append(f"last_reported_symbol: {account_ctx['symbol']}")
-    if account_ctx.get("strategy_name"):
-        lines.append(f"last_reported_strategy: {account_ctx['strategy_name']}")
-    if not has_values:
-        lines.append("No account snapshot on file for this magic_number.")
-        lines.append("")
-        context_parts.extend(lines)
-        return
-    lines.extend([
-        "account_size: " + (str(account_ctx.get("account_size")) if account_ctx.get("account_size") is not None else "—"),
-        "realised_pnl: " + (str(account_ctx.get("realised_pnl")) if account_ctx.get("realised_pnl") is not None else "—"),
-        "today_realised_pnl: " + (str(account_ctx.get("today_realised_pnl")) if account_ctx.get("today_realised_pnl") is not None else "—"),
-        "unrealised_pnl: " + (str(account_ctx.get("unrealised_pnl")) if account_ctx.get("unrealised_pnl") is not None else "—"),
-        "week_pnl: " + (str(account_ctx.get("week_pnl")) if account_ctx.get("week_pnl") is not None else "—"),
-        "month_pnl: " + (str(account_ctx.get("month_pnl")) if account_ctx.get("month_pnl") is not None else "—"),
+def _context_section_header() -> List[str]:
+    return [
+        "=== CONTEXT (USE FOR YOUR ANALYSIS) ===",
+        "Everything below is the data for this run. Read each section in order and tie your output to it.",
+        "",
+    ]
+
+
+def _append_run_metadata_sod(
+    parts: List[str],
+    magic_number: int,
+    symbol: str,
+    strategy_name: str,
+) -> None:
+    parts.extend([
+        "=== RUN INFO ===",
+        "Bot instance, symbol, strategy, and London time for this SOD run.",
+        "",
+        f"MAGIC_NUMBER: {magic_number}",
+        f"SYMBOL: {symbol}",
+        f"STRATEGY: {strategy_name}",
+        f"ANALYSIS DATE: {datetime.now(timezone.utc).isoformat()}",
+        f"CURRENT TIME (London): {_london_time_str()}",
+        "NOTE: All OHLC timestamps and chart images are London local time.",
+        "      next_review_time must be London local (format: YYYY-MM-DDTHH:MM:SS, no Z).",
+        "",
+        "=== SYSTEM INFO ===",
+        "SOD runs automatically at 07:00 London each morning. Set today's bias and first intraday check.",
         "",
     ])
-    context_parts.extend(lines)
+
+
+def _append_run_metadata_intraday(
+    parts: List[str],
+    magic_number: int,
+    symbol: str,
+    strategy_name: str,
+) -> None:
+    parts.extend([
+        "=== RUN INFO ===",
+        "Bot instance, symbol, strategy, and London time for this intraday check.",
+        "",
+        f"MAGIC_NUMBER: {magic_number}",
+        f"SYMBOL: {symbol}",
+        f"STRATEGY: {strategy_name}",
+        f"ANALYSIS TIME: {datetime.now(timezone.utc).isoformat()}",
+        f"CURRENT TIME (London): {_london_time_str()}",
+        "NOTE: All OHLC timestamps and chart images are London local time.",
+        "      next_review_time must be London local (format: YYYY-MM-DDTHH:MM:SS, no Z).",
+        "",
+        "=== SYSTEM INFO ===",
+        "Intraday check — continue from today's SOD and your prior intraday note if present.",
+        "Do not schedule next_review_time at 07:00 London (reserved for automatic SOD).",
+        "",
+    ])
+
+
+def _append_market_context(parts: List[str], market_context: Dict[str, Any]) -> None:
+    parts.extend([
+        "=== MARKET INTELLIGENCE ===",
+        "Pre-synthesized global brief (regime, risk, drivers, catalysts). Not raw news feeds.",
+        "",
+        json.dumps(market_context, indent=2),
+        "",
+    ])
+
+
+def format_account_snapshot_line(account_ctx: Dict[str, Any]) -> str:
+    """One-line account summary for prompts (trading + chat)."""
+    keys = (
+        "account_size", "realised_pnl", "today_realised_pnl",
+        "unrealised_pnl", "week_pnl", "month_pnl",
+    )
+    if not any(account_ctx.get(k) is not None for k in keys):
+        return "ACCOUNT: (no snapshot on file)"
+    parts = []
+    for key, label in (
+        ("account_size", "size"),
+        ("realised_pnl", "realised"),
+        ("today_realised_pnl", "today"),
+        ("unrealised_pnl", "unreal"),
+        ("week_pnl", "week"),
+        ("month_pnl", "month"),
+    ):
+        v = account_ctx.get(key)
+        parts.append(f"{label}={v if v is not None else '—'}")
+    return "ACCOUNT: " + " ".join(parts)
+
+
+def format_positions_compact(positions: List[Dict[str, Any]]) -> str:
+    """Compact open positions block (one line per position)."""
+    if not positions:
+        return "OPEN POSITIONS: none"
+    lines = ["OPEN POSITIONS:"]
+    for p in positions:
+        tid = p.get("trade_id")
+        lines.append(
+            f"  trade_id={tid} {p.get('direction')} {p.get('asset')} "
+            f"entry={p.get('entry_price')} sl={p.get('stop_loss')} tp={p.get('take_profit')} "
+            f"lots={p.get('lot_size')}"
+        )
+    return "\n".join(lines)
+
+
+def _append_analysis_and_positions_sod(
+    parts: List[str],
+    previous_intraday: Optional[str],
+    db_positions: List[Dict[str, Any]],
+) -> None:
+    if previous_intraday:
+        parts.extend([
+            "=== YESTERDAY'S LAST INTRADAY CHECK ===",
+            "Final intraday note from before today's SOD (cleared when SOD saves). Use only if still relevant.",
+            "",
+            previous_intraday,
+            "",
+        ])
+    _append_positions_context(parts, db_positions)
+
+
+def _append_analysis_and_positions_intraday(
+    parts: List[str],
+    sod_text: Optional[str],
+    last_intraday: Optional[str],
+    db_positions: List[Dict[str, Any]],
+    fill_event: Optional[str] = None,
+) -> None:
+    if fill_event:
+        parts.extend([
+            "=== FILL EVENT ===",
+            f"Broker-confirmed: {fill_event} (this intraday run was triggered immediately after).",
+            "",
+        ])
+    if sod_text:
+        parts.extend([
+            "=== START OF DAY ANALYSIS ===",
+            "Today's SOD bias and plan — carry forward unless you explicitly invalidate it.",
+            "",
+            sod_text,
+            "",
+        ])
+    if last_intraday:
+        parts.extend([
+            "=== LAST INTRADAY CHECK ===",
+            "Your previous intraday note from earlier today — sentence 1 must thread from this (continue / adjust / invalidate).",
+            "",
+            last_intraday,
+            "",
+        ])
+    _append_positions_context(parts, db_positions)
+
+
+def _append_positions_context(
+    parts: List[str],
+    db_positions: List[Dict[str, Any]],
+) -> None:
+    parts.extend([
+        format_positions_compact(db_positions),
+        "Use trade_id from open positions for MANAGE/EXIT.",
+        "",
+    ])
+
+
+def _append_ohlc_context(parts: List[str], processed_ohlc: Dict[str, Any]) -> None:
+    parts.extend([
+        "=== OHLC DATA ANALYSIS ===",
+        "Structured swings, imbalances, FVGs, and levels from raw candles (not the raw bars).",
+        "",
+        json.dumps(processed_ohlc, indent=2),
+        "",
+    ])
+
+
+def _append_chart_context(parts: List[str], chart_observations: Any) -> None:
+    parts.extend([
+        "=== CHART VISUAL ANALYSIS ===",
+        "GPT Vision observations from chart images — pure price action, no trade decision.",
+        "",
+        _chart_block_for_context(chart_observations),
+        "",
+    ])
+
+
+def _append_account_context(context_parts: list, account_ctx: Dict[str, Any]) -> None:
+    """Append latest account snapshot (one line, from DB)."""
+    context_parts.extend([
+        format_account_snapshot_line(account_ctx),
+        "",
+    ])
 
 
 def _get_market_data_cached(symbol: str) -> Dict[str, Any]:
@@ -545,14 +761,13 @@ def sod_action(
     symbol: str,
     ohlc_data: Dict[str, List[Dict[str, Any]]],
     magic_number: int,
-    positions: List[Dict[str, Any]] = None,  # DEPRECATED - now retrieved from DB
-    strategy_name: str = None,
+    strategy_name: str,
 ) -> Dict[str, Any]:
     """
     Start of Day (SOD) action - comprehensive daily market analysis.
 
     Workflow:
-      0. Load DB positions + previous run note + strategy (if specified)
+      0. Load DB positions + account + previous run note + strategy (required)
       1. OHLC analysis
       2. Market data  — reuses today's London morning brief (≥05:00) in DB if present;
                         otherwise fetches and saves (market_data_note)
@@ -564,8 +779,7 @@ def sod_action(
         symbol:        Trading symbol (e.g. "GBPUSD")
         ohlc_data:     {timeframe_key: [candle dicts], ...}
         magic_number:  MT5 EA magic number (unique per bot instance)
-        positions:     DEPRECATED - positions now retrieved from database
-        strategy_name: Name of the strategy to load from DB (optional)
+        strategy_name: Name of the strategy to load from DB (required)
 
     Returns:
         Comprehensive SOD analysis as JSON dictionary
@@ -574,7 +788,18 @@ def sod_action(
     print(f"SOD Analysis starting: {symbol} (magic {magic_number})")
     print("=" * 60)
 
-    scoped_strategy = strategy_name or ''
+    try:
+        strategy_prompt_text = _require_strategy_prompt(strategy_name)
+    except ValueError as e:
+        print(f"[brain] {e}")
+        return {
+            "error": str(e),
+            "symbol": symbol,
+            "analysis_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    scoped_strategy = strategy_name.strip()
+    print(f"[brain] Strategy loaded: '{scoped_strategy}'")
 
     # ------------------------------------------------------------------
     # Step 0: DB reads (fast, sequential — no API calls)
@@ -583,19 +808,13 @@ def sod_action(
     db_positions = get_current_positions(symbol, magic_number)
     analysis_record = get_analysis_record(magic_number, symbol, scoped_strategy)
     previous_intraday = (
-        analysis_record.get("intraday_analysis") if analysis_record else None
+        analysis_note_text(
+            analysis_record.get("intraday_analysis") if analysis_record else None,
+            "intraday_analysis",
+        )
     )
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print("[brain] Previous intraday note found" if previous_intraday else "[brain] No previous intraday note")
-
-    strategy_prompt_text = None
-    if strategy_name:
-        strategy = get_strategy(strategy_name)
-        if strategy:
-            strategy_prompt_text = strategy["strategy_prompt"]
-            print(f"[brain] Strategy loaded: '{strategy_name}'")
-        else:
-            print(f"[brain] WARNING: Strategy '{strategy_name}' not found in DB — proceeding without it")
 
     # ------------------------------------------------------------------
     # Step 1: Parallel data collection
@@ -659,62 +878,23 @@ def sod_action(
                     print(f"[brain] Market data error: {e}")
 
     # ------------------------------------------------------------------
-    # Step 2: Assemble full context
+    # Step 2: Assemble full context (user prompt)
     # ------------------------------------------------------------------
     print("\n[brain] Step 2: Assembling decision context...")
 
-    context_parts = _user_run_instructions("sod", "sod_analysis")
-    context_parts.extend(_strategy_mandate_lines(strategy_name))
-    context_parts.extend([
-        f"MAGIC_NUMBER: {magic_number}",
-        f"SYMBOL: {symbol}",
-        f"STRATEGY: {scoped_strategy or '(none)'}",
-        f"ANALYSIS DATE: {datetime.now(timezone.utc).isoformat()}",
-        f"CURRENT TIME (London): {_london_time_str()}",
-        "NOTE: All OHLC candle timestamps and chart images are in London local time.",
-        "      next_review_time must be output as London local time (format: YYYY-MM-DDTHH:MM:SS, no Z).",
-        "",
-        "=== SYSTEM INFO ===",
-        "SOD (Start of Day) analysis — runs automatically at 07:00 London time every morning.",
-        "Use this analysis to set your bias and trading plan for the full day ahead.",
-        ""
-    ])
-
-    if previous_intraday:
-        context_parts.extend([
-            "=== PREVIOUS INTRADAY ANALYSIS (before today's SOD) ===",
-            previous_intraday,
-            ""
-        ])
-
-    if db_positions:
-        context_parts.extend([
-            "=== CURRENT OPEN POSITIONS (From Database) ===",
-            json.dumps(db_positions, indent=2),
-            ""
-        ])
-
-    if positions:
-        context_parts.extend([
-            "=== EA REPORTED POSITIONS (For Validation) ===",
-            json.dumps(positions, indent=2),
-            ""
-        ])
-
-    # Account context (latest snapshot for this magic_number)
     account_ctx = get_account_context_for_analysis(magic_number)
+    context_parts: List[str] = []
+    context_parts.extend(_user_run_instructions("sod", "sod_analysis"))
+    context_parts.extend(_strategy_mandate_lines(scoped_strategy))
+    context_parts.extend(_context_section_header())
+    _append_run_metadata_sod(context_parts, magic_number, symbol, scoped_strategy)
+    _append_market_context(context_parts, market_context)
+    _append_analysis_and_positions_sod(
+        context_parts, previous_intraday, db_positions
+    )
+    _append_ohlc_context(context_parts, processed_ohlc)
+    _append_chart_context(context_parts, chart_observations)
     _append_account_context(context_parts, account_ctx)
-
-    context_parts.extend([
-        "=== OHLC DATA ANALYSIS ===",
-        json.dumps(processed_ohlc, indent=2),
-        "",
-        "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
-        _chart_block_for_context(chart_observations),
-        "",
-        "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
-        json.dumps(market_context, indent=2)
-    ])
 
     full_context = "\n".join(context_parts)
 
@@ -722,8 +902,6 @@ def sod_action(
     # Step 3: Trading decision — GPT-4o-mini with full assembled context
     # ------------------------------------------------------------------
     print("\n[brain] Step 3: Sending to GPT-4o-mini for SOD trading decision...")
-    if strategy_name:
-        print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
         sod_prompt    = compose_sod_prompt(strategy_prompt_text)
         response_text = call_gpt(
@@ -736,17 +914,16 @@ def sod_action(
         parsed = _parse_gpt_response(response_text)
         result = _normalize_trading_response(parsed, "sod_analysis", symbol)
 
-        print("[brain] Saving SOD analysis + bot_action to database...")
+        print("[brain] Saving SOD run JSON to analysis_notes...")
         try:
-            result["bot_action"] = _persist_trading_run(
+            _persist_trading_run(
                 magic_number,
                 symbol,
                 scoped_strategy,
                 "sod_analysis",
-                result.get("sod_analysis") or "",
-                result["bot_action"],
+                _build_run_record_json(result, "sod_analysis"),
             )
-            print("[brain] sod_analysis + bot_action saved")
+            print("[brain] sod_analysis saved")
         except Exception as e:
             print(f"[brain] Error saving SOD to database: {e}")
 
@@ -757,7 +934,7 @@ def sod_action(
             "ohlc_timeframes_analyzed": list(ohlc_data.keys()),
             "chart_timeframes_analyzed": timeframes,
             "previous_intraday_context_used": previous_intraday is not None,
-            "strategy_used": strategy_name if strategy_prompt_text else None,
+            "strategy_used": scoped_strategy,
         }
 
         print("\n" + "=" * 60)
@@ -792,14 +969,14 @@ def intraday_action(
     symbol: str,
     ohlc_data: Dict[str, List[Dict[str, Any]]],
     magic_number: int,
-    positions: List[Dict[str, Any]] = None,  # DEPRECATED - now retrieved from DB
-    strategy_name: str = None,
+    strategy_name: str,
+    fill_event: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Intraday action - active trading analysis during the day.
 
     Workflow:
-      0. Load DB positions + SOD note + last run note + strategy (if specified)
+      0. Load DB positions + SOD note + last run note + strategy (required)
       1. OHLC analysis
       2. Market data  — loaded from DB cache (market_data_note saved by SOD).
                         Re-fetched only if cache is missing or older than MARKET_DATA_CACHE_HOURS.
@@ -811,8 +988,8 @@ def intraday_action(
         symbol:        Trading symbol (e.g. "GBPUSD")
         ohlc_data:     {timeframe_key: [candle dicts], ...}
         magic_number:  MT5 EA magic number (unique per bot instance)
-        positions:     DEPRECATED - positions now retrieved from database
-        strategy_name: Name of the strategy to load from DB (optional)
+        fill_event:    Optional broker event that triggered this run (ENTRY_FILL, EXIT, SL, TP, PARTIAL)
+        strategy_name: Name of the strategy to load from DB (required)
 
     Returns:
         Intraday trading decision as JSON dictionary
@@ -821,7 +998,18 @@ def intraday_action(
     print(f"Intraday Analysis starting: {symbol} (magic {magic_number})")
     print("=" * 60)
 
-    scoped_strategy = strategy_name or ''
+    try:
+        strategy_prompt_text = _require_strategy_prompt(strategy_name)
+    except ValueError as e:
+        print(f"[brain] {e}")
+        return {
+            "error": str(e),
+            "symbol": symbol,
+            "analysis_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    scoped_strategy = strategy_name.strip()
+    print(f"[brain] Strategy loaded: '{scoped_strategy}'")
 
     # ------------------------------------------------------------------
     # Step 0: DB reads (fast, sequential — no API calls)
@@ -829,19 +1017,16 @@ def intraday_action(
     print("\n[brain] Loading DB context...")
     db_positions = get_current_positions(symbol, magic_number)
     analysis_record = get_analysis_record(magic_number, symbol, scoped_strategy)
-    sod_text = analysis_record.get("sod_analysis") if analysis_record else None
-    last_intraday = analysis_record.get("intraday_analysis") if analysis_record else None
+    sod_text = analysis_note_text(
+        analysis_record.get("sod_analysis") if analysis_record else None,
+        "sod_analysis",
+    )
+    last_intraday = analysis_note_text(
+        analysis_record.get("intraday_analysis") if analysis_record else None,
+        "intraday_analysis",
+    )
     print(f"[brain] Positions: {len(db_positions)} open" if db_positions else "[brain] No open positions")
     print(f"[brain] SOD analysis: {'found' if sod_text else 'missing'} | Prior intraday: {'found' if last_intraday else 'missing'}")
-
-    strategy_prompt_text = None
-    if strategy_name:
-        strategy = get_strategy(strategy_name)
-        if strategy:
-            strategy_prompt_text = strategy["strategy_prompt"]
-            print(f"[brain] Strategy loaded: '{strategy_name}'")
-        else:
-            print(f"[brain] WARNING: Strategy '{strategy_name}' not found in DB — proceeding without it")
 
     timeframes = _chart_timeframes_from_ohlc_keys(ohlc_data) or ["M5", "H1"]
 
@@ -896,70 +1081,23 @@ def intraday_action(
                     print(f"[brain] Market data error: {e}")
 
     # ------------------------------------------------------------------
-    # Step 2: Assemble full context
+    # Step 2: Assemble full context (user prompt)
     # ------------------------------------------------------------------
     print("\n[brain] Step 2: Assembling decision context...")
 
-    context_parts = _user_run_instructions("intraday", "intraday_analysis")
-    context_parts.extend(_strategy_mandate_lines(strategy_name))
-    context_parts.extend([
-        f"MAGIC_NUMBER: {magic_number}",
-        f"SYMBOL: {symbol}",
-        f"STRATEGY: {scoped_strategy or '(none)'}",
-        f"ANALYSIS TIME: {datetime.now(timezone.utc).isoformat()}",
-        f"CURRENT TIME (London): {_london_time_str()}",
-        "NOTE: All OHLC candle timestamps and chart images are in London local time.",
-        "      next_review_time must be output as London local time (format: YYYY-MM-DDTHH:MM:SS, no Z).",
-        "",
-        "=== SYSTEM INFO ===",
-        "SOD (Start of Day) analysis runs automatically at 07:00 London time every morning.",
-        "You are currently in an INTRADAY analysis run.",
-        "Use the SOD note below to understand today's overall bias and trading plan.",
-        ""
-    ])
-
-    if sod_text:
-        context_parts.extend([
-            "=== START OF DAY ANALYSIS (Today's SOD) ===",
-            sod_text,
-            ""
-        ])
-
-    if last_intraday:
-        context_parts.extend([
-            "=== LAST INTRADAY ANALYSIS (Previous Check) ===",
-            last_intraday,
-            ""
-        ])
-
-    if db_positions:
-        context_parts.extend([
-            "=== CURRENT OPEN POSITIONS (From Database) ===",
-            json.dumps(db_positions, indent=2),
-            ""
-        ])
-
-    if positions:
-        context_parts.extend([
-            "=== EA REPORTED POSITIONS (For Validation) ===",
-            json.dumps(positions, indent=2),
-            ""
-        ])
-
-    # Account context (latest snapshot for this magic_number)
     account_ctx = get_account_context_for_analysis(magic_number)
+    context_parts: List[str] = []
+    context_parts.extend(_user_run_instructions("intraday", "intraday_analysis", fill_event=fill_event))
+    context_parts.extend(_strategy_mandate_lines(scoped_strategy))
+    context_parts.extend(_context_section_header())
+    _append_run_metadata_intraday(context_parts, magic_number, symbol, scoped_strategy)
+    _append_market_context(context_parts, market_context)
+    _append_analysis_and_positions_intraday(
+        context_parts, sod_text, last_intraday, db_positions, fill_event=fill_event
+    )
+    _append_ohlc_context(context_parts, processed_ohlc)
+    _append_chart_context(context_parts, chart_observations)
     _append_account_context(context_parts, account_ctx)
-
-    context_parts.extend([
-        "=== OHLC DATA ANALYSIS ===",
-        json.dumps(processed_ohlc, indent=2),
-        "",
-        "=== CHART VISUAL ANALYSIS (GPT Vision — pure visual observations) ===",
-        _chart_block_for_context(chart_observations),
-        "",
-        "=== MARKET INTELLIGENCE (pre-synthesized: regime, risk profile, forex outlook, catalysts) ===",
-        json.dumps(market_context, indent=2)
-    ])
 
     full_context = "\n".join(context_parts)
 
@@ -967,8 +1105,6 @@ def intraday_action(
     # Step 3: Trading decision — GPT-4o-mini with full assembled context
     # ------------------------------------------------------------------
     print("\n[brain] Step 3: Sending to GPT-4o-mini for intraday trading decision...")
-    if strategy_name:
-        print(f"[brain] Using strategy: '{strategy_name}'" if strategy_prompt_text else f"[brain] Strategy '{strategy_name}' unavailable — no strategy section in prompt")
     try:
         intraday_prompt = compose_intraday_prompt(strategy_prompt_text)
         response_text = call_gpt(
@@ -981,17 +1117,16 @@ def intraday_action(
         parsed = _parse_gpt_response(response_text)
         result = _normalize_trading_response(parsed, "intraday_analysis", symbol)
 
-        print("[brain] Saving intraday analysis + bot_action to database...")
+        print("[brain] Saving intraday run JSON to analysis_notes...")
         try:
-            result["bot_action"] = _persist_trading_run(
+            _persist_trading_run(
                 magic_number,
                 symbol,
                 scoped_strategy,
                 "intraday_analysis",
-                result.get("intraday_analysis") or "",
-                result["bot_action"],
+                _build_run_record_json(result, "intraday_analysis"),
             )
-            print("[brain] intraday_analysis + bot_action saved")
+            print("[brain] intraday_analysis saved")
         except Exception as e:
             print(f"[brain] Error saving intraday to database: {e}")
 
@@ -1003,7 +1138,7 @@ def intraday_action(
             "sod_context_used": sod_text is not None,
             "last_intraday_context_used": last_intraday is not None,
             "market_data_from_cache": market_from_cache,
-            "strategy_used": strategy_name if strategy_prompt_text else None,
+            "strategy_used": scoped_strategy,
         }
 
         print("\n" + "=" * 60)
