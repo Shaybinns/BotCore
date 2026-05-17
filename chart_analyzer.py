@@ -342,7 +342,7 @@ def analyze_charts_with_gpt_vision(
         response = _get_openai_client().chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=3000,
+            max_tokens=2000,
             temperature=0.2
         )
         raw = response.choices[0].message.content or ""

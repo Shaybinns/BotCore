@@ -10,6 +10,7 @@
 //--- Input parameters
 input string   ServerURL = "https://botcore-production.up.railway.app";  // BotCore API URL
 input string   TradingSymbol = "GBPUSD";              // Symbol to trade
+input int      MagicNumber = 0;                       // Unique EA instance ID (sent on every API call; must be > 0)
 input string   SODTime = "07:00";                     // Start of Day time — LONDON TIME (HH:MM, 24h). BST/GMT offset detected automatically.
 input string   StrategyName = "";                     // Strategy name (must match a record in the DB strategies table)
 input double   InitialAccountSize = 0;                // Initial balance for realised PnL (0 = use current balance only, no realised sent)
@@ -33,6 +34,29 @@ string MonitoringTimeframes = "";  // Comma-separated string
 int CurrentPositionTicket = -1;
 string LastAIResponse = "";
 
+// Flat API payload (top-level keys from server — no nested JSON parsing)
+struct EATradingPayload
+{
+   int    magic_number;
+   string next_review_time;
+   string action_type;
+   string monitoring_timeframes;
+   string enter_symbol;
+   string enter_direction;
+   double enter_price;
+   double enter_stop_loss;
+   double enter_take_profit;
+   double enter_risk_percentage;
+   int    manage_trade_id;
+   double manage_new_stop_loss;
+   double manage_new_take_profit;
+   double manage_new_position_percentage;
+   bool   manage_exit_trade;
+   int    exit_trade_id;
+};
+
+EATradingPayload g_Payload;
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                     |
 //+------------------------------------------------------------------+
@@ -42,9 +66,17 @@ int OnInit()
    Print("AIBot EA v2.0 Initialized");
    Print("Server URL: ", ServerURL);
    Print("Trading Symbol: ", TradingSymbol);
+   Print("Magic Number: ", MagicNumber);
    Print("SOD Time: ", SODTime);
    Print("Strategy: ", StringLen(StrategyName) > 0 ? StrategyName : "(none)");
    Print("========================================");
+   
+   if(MagicNumber <= 0)
+   {
+      Print("ERROR: MagicNumber must be a positive integer (unique per EA instance).");
+      Print("Set MagicNumber in EA inputs (Tools -> EA Properties -> Inputs).");
+      return(INIT_FAILED);
+   }
    
    // Validate strategy against server before allowing EA to run
    if(!ValidateStrategy())
@@ -310,60 +342,102 @@ void RunIntraday()
 }
 
 //+------------------------------------------------------------------+
-//| Phase 3: Parse AI Response and Execute Actions                   |
+//| Load flat top-level fields from API response into g_Payload      |
+//+------------------------------------------------------------------+
+void LoadPayloadFromResponse(string json)
+{
+   g_Payload.magic_number = (int)ReadJsonDouble(json, "magic_number");
+   g_Payload.next_review_time = ReadJsonString(json, "next_review_time");
+   g_Payload.action_type = ReadJsonString(json, "action_type");
+   g_Payload.monitoring_timeframes = ReadJsonString(json, "monitoring_timeframes");
+   g_Payload.enter_symbol = ReadJsonString(json, "enter_symbol");
+   g_Payload.enter_direction = ReadJsonString(json, "enter_direction");
+   g_Payload.enter_price = ReadJsonDouble(json, "enter_price");
+   g_Payload.enter_stop_loss = ReadJsonDouble(json, "enter_stop_loss");
+   g_Payload.enter_take_profit = ReadJsonDouble(json, "enter_take_profit");
+   g_Payload.enter_risk_percentage = ReadJsonDouble(json, "enter_risk_percentage");
+   g_Payload.manage_trade_id = (int)ReadJsonDouble(json, "manage_trade_id");
+   g_Payload.manage_new_stop_loss = ReadJsonDouble(json, "manage_new_stop_loss");
+   g_Payload.manage_new_take_profit = ReadJsonDouble(json, "manage_new_take_profit");
+   g_Payload.manage_new_position_percentage = ReadJsonDouble(json, "manage_new_position_percentage");
+   g_Payload.manage_exit_trade = ReadJsonBool(json, "manage_exit_trade");
+   g_Payload.exit_trade_id = (int)ReadJsonDouble(json, "exit_trade_id");
+}
+
+//+------------------------------------------------------------------+
+//| Set NextReviewTime from London-local ISO string                  |
+//+------------------------------------------------------------------+
+void SetNextReviewTime(string londonTimeStr)
+{
+   if(StringLen(londonTimeStr) == 0)
+   {
+      Print("WARNING: No next_review_time in API response");
+      return;
+   }
+   NextReviewTime = ParseISO8601ToServerTime(londonTimeStr);
+   if(NextReviewTime > 0)
+      Print("Next Review (server time): ", TimeToString(NextReviewTime));
+   else
+      Print("WARNING: Could not parse next_review_time: ", londonTimeStr);
+}
+
+//+------------------------------------------------------------------+
+//| Apply API response — schedule + optional trade execution         |
 //+------------------------------------------------------------------+
 void ParseAIResponse(string response)
 {
    Print("========================================");
-   Print("Parsing AI Response");
+   Print("Applying API Response");
    Print("========================================");
    
    LastAIResponse = response;
+   LoadPayloadFromResponse(response);
    
-   // Extract action
-   CurrentAction = ExtractJSONString(response, "action");
-   Print("Action: ", CurrentAction);
-   
-   // Extract next_review_time
-   string nextReviewStr = ExtractJSONString(response, "next_review_time");
-   Print("DEBUG raw nextReviewStr: [", nextReviewStr, "]");
-   long dbgTC = (long)TimeCurrent();
-   long dbgGMT = (long)TimeGMT();
-   Print("DEBUG TimeCurrent=", dbgTC, " TimeGMT=", dbgGMT, " offset_sec=", (dbgTC - dbgGMT));
-   if(StringLen(nextReviewStr) > 0)
+   if(g_Payload.magic_number > 0 && g_Payload.magic_number != MagicNumber)
    {
-      NextReviewTime = ParseISO8601ToServerTime(nextReviewStr);
-      if(NextReviewTime > 0)
-      {
-         Print("Next Review (server time): ", TimeToString(NextReviewTime));
-      }
-      else
-      {
-         Print("WARNING: Could not parse next_review_time: ", nextReviewStr);
-      }
+      Print("ERROR: API magic_number (", g_Payload.magic_number,
+            ") does not match EA MagicNumber (", MagicNumber, ")");
+      return;
    }
+   if(g_Payload.magic_number > 0)
+      Print("magic_number OK: ", g_Payload.magic_number);
    
-   // Extract monitoring_timeframes (as comma-separated string)
-   MonitoringTimeframes = ExtractJSONArray(response, "monitoring_timeframes");
+   SetNextReviewTime(g_Payload.next_review_time);
+   MonitoringTimeframes = g_Payload.monitoring_timeframes;
+   CurrentAction = g_Payload.action_type;
+   
+   Print("action_type: ", (StringLen(CurrentAction) > 0 ? CurrentAction : "null"));
    Print("Monitoring Timeframes: ", MonitoringTimeframes);
    
-   // Phase 8: Execute based on action
    if(CurrentAction == "ENTER")
    {
-      ExecuteEnter(response);
+      ExecuteEnter(
+         g_Payload.enter_symbol,
+         g_Payload.enter_direction,
+         g_Payload.enter_price,
+         g_Payload.enter_stop_loss,
+         g_Payload.enter_take_profit,
+         g_Payload.enter_risk_percentage
+      );
    }
    else if(CurrentAction == "MANAGE")
    {
-      ExecuteManage(response);
+      ExecuteManage(
+         g_Payload.manage_trade_id,
+         g_Payload.manage_new_stop_loss,
+         g_Payload.manage_new_take_profit,
+         g_Payload.manage_new_position_percentage,
+         g_Payload.manage_exit_trade
+      );
    }
    else if(CurrentAction == "EXIT")
    {
-      ExecuteExit(response);
+      ExecuteExit(g_Payload.exit_trade_id);
    }
-   // CHECK: any run with no chart execution (was WAIT / WATCH / HOTZONE). Legacy strings still accepted.
-   else if(CurrentAction == "CHECK" || CurrentAction == "WAIT" || CurrentAction == "WATCH" || CurrentAction == "HOTZONE")
+   else
    {
       UpdateState(STATE_CHECK);
+      Print("No trade action this run (action_type is null)");
    }
    
    Print("========================================");
@@ -375,25 +449,23 @@ void ParseAIResponse(string response)
 //+------------------------------------------------------------------+
 //| Phase 8: Execute ENTER action (Placeholder)                      |
 //+------------------------------------------------------------------+
-void ExecuteEnter(string response)
+void ExecuteEnter(
+   string assetTraded,
+   string orderType,
+   double entryPrice,
+   double stopLoss,
+   double takeProfit,
+   double riskPercentage
+)
 {
    Print("========================================");
    Print("EXECUTING ENTER ACTION");
    Print("========================================");
    
-   // Extract asset_traded
-   string assetTraded = ExtractJSONString(response, "asset_traded");
    if(StringLen(assetTraded) == 0)
-   {
-      assetTraded = TradingSymbol;  // Fallback to default
-   }
-   
-   // Extract enter_order details
-   string orderType = ExtractNestedJSONString(response, "enter_order", "order_type");
-   double entryPrice = ExtractNestedJSONDouble(response, "enter_order", "entry_price");
-   double stopLoss = ExtractNestedJSONDouble(response, "enter_order", "stop_loss");
-   double takeProfit = ExtractNestedJSONDouble(response, "enter_order", "take_profit");
-   double riskPercentage = ExtractNestedJSONDouble(response, "enter_order", "risk_percentage");
+      assetTraded = TradingSymbol;
+   if(riskPercentage <= 0)
+      riskPercentage = 0.01;
    
    Print("Asset: ", assetTraded);
    Print("Order Type: ", orderType);
@@ -442,37 +514,40 @@ void ExecuteEnter(string response)
 //+------------------------------------------------------------------+
 //| Phase 8: Execute MANAGE action                                   |
 //+------------------------------------------------------------------+
-void ExecuteManage(string response)
+void ExecuteManage(
+   int ticket,
+   double updateSL,
+   double updateTP,
+   double partialClosePercent,
+   bool exitTrade
+)
 {
    Print("========================================");
    Print("EXECUTING MANAGE ACTION");
    Print("========================================");
    
-   // Extract ticket number
-   int ticket = (int)ExtractNestedJSONDouble(response, "manage_order", "ticket");
-   
    if(ticket <= 0)
    {
-      Print("❌ Invalid ticket number: ", ticket);
+      Print("❌ Invalid trade_id: ", ticket);
       return;
    }
    
    Print("Managing Position - Ticket: ", ticket);
    
-   // Extract position details for validation
-   string aiAsset = ExtractNestedJSONString(response, "manage_order.position", "asset");
-   string aiDirection = ExtractNestedJSONString(response, "manage_order.position", "direction");
-   double aiEntryPrice = ExtractNestedJSONDouble(response, "manage_order.position", "entry_price");
+   string aiAsset = TradingSymbol;
+   string aiDirection = "";
+   double aiEntryPrice = 0;
    
-   Print("AI Position Details:");
-   Print("  Asset: ", aiAsset);
-   Print("  Direction: ", aiDirection);
-   Print("  Entry Price: ", aiEntryPrice);
-   
-   // Extract manage_order details
-   double updateSL = ExtractNestedJSONDouble(response, "manage_order", "update_stop_loss");
-   double updateTP = ExtractNestedJSONDouble(response, "manage_order", "update_take_profit");
-   double partialClosePercent = ExtractNestedJSONDouble(response, "manage_order", "partial_close_percentage");
+   if(exitTrade)
+   {
+      Print("manage.exit_trade=true — closing position");
+      if(ClosePosition(ticket))
+      {
+         UpdateState(STATE_CHECK);
+         StoreCurrentPositions();
+      }
+      return;
+   }
    
    Print("Manage Actions:");
    if(updateSL > 0) Print("  Update SL: ", updateSL);
@@ -507,15 +582,11 @@ void ExecuteManage(string response)
 //+------------------------------------------------------------------+
 //| Phase 8: Execute EXIT action                                     |
 //+------------------------------------------------------------------+
-void ExecuteExit(string response)
+void ExecuteExit(int ticket)
 {
    Print("========================================");
    Print("EXECUTING EXIT ACTION");
    Print("========================================");
-   
-   // Extract ticket number
-   int ticket = (int)ExtractNestedJSONDouble(response, "exit_order", "ticket");
-   string reason = ExtractNestedJSONString(response, "exit_order", "reason");
    
    if(ticket <= 0)
    {
@@ -524,20 +595,8 @@ void ExecuteExit(string response)
    }
    
    Print("Closing Position - Ticket: ", ticket);
-   Print("Reason: ", reason);
    
-   // Extract position details for validation
-   string aiAsset = ExtractNestedJSONString(response, "exit_order.position", "asset");
-   string aiDirection = ExtractNestedJSONString(response, "exit_order.position", "direction");
-   double aiEntryPrice = ExtractNestedJSONDouble(response, "exit_order.position", "entry_price");
-   
-   Print("AI Position Details:");
-   Print("  Asset: ", aiAsset);
-   Print("  Direction: ", aiDirection);
-   Print("  Entry Price: ", aiEntryPrice);
-   
-   // Validate exit order (ticket + position details)
-   if(!ValidateExitOrder(ticket, aiAsset, aiDirection, aiEntryPrice))
+   if(!ValidateExitOrder(ticket, TradingSymbol, "", 0))
    {
       Print("❌ Exit validation failed");
       return;
@@ -811,7 +870,7 @@ int PlaceOrder(string symbol, string orderType, double entryPrice, double stopLo
    request.sl = stopLoss;
    request.tp = takeProfit;
    request.deviation = 10;
-   request.magic = 123456;
+   request.magic = MagicNumber;
    request.comment = "BotCore AI";
    
    // Send order
@@ -1030,7 +1089,7 @@ void ExecutePartialClose(int ticket, double percentage)
                     SymbolInfoDouble(symbol, SYMBOL_BID) : 
                     SymbolInfoDouble(symbol, SYMBOL_ASK);
    request.deviation = 10;
-   request.magic = 123456;
+   request.magic = MagicNumber;
    request.comment = "Partial close " + DoubleToString(percentage, 0) + "%";
    
    if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE)
@@ -1119,7 +1178,7 @@ bool ClosePosition(int ticket)
                     SymbolInfoDouble(symbol, SYMBOL_BID) : 
                     SymbolInfoDouble(symbol, SYMBOL_ASK);
    request.deviation = 10;
-   request.magic = 123456;
+   request.magic = MagicNumber;
    request.comment = "BotCore AI Exit";
    
    if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE)
@@ -1169,6 +1228,8 @@ string PrepareSODOHLCData()
    // Add strategy (empty string if not configured)
    json += "\"strategy\":\"" + StrategyName + "\",";
    
+   json += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
+   
    // Account details for AI context (balance, PnL)
    datetime now = TimeCurrent();
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -1181,24 +1242,13 @@ string PrepareSODOHLCData()
    json += "\"week_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 7*86400, now), 2) + ",";
    json += "\"month_pnl\":" + DoubleToString(GetRealisedPnLInRange(now - 30*86400, now), 2) + ",";
    
-   // Get and add 1h DATA
-   json += "\"1h_DATA\":";
-   json += GetOHLCArray(TradingSymbol, PERIOD_H1, 200);
-   json += ",";
-   
-   // Get and add 4h DATA
+   // SOD: H4 + 1D only (server OHLC analyzer + chart vision)
    json += "\"4h_DATA\":";
-   json += GetOHLCArray(TradingSymbol, PERIOD_H4, 150);
+   json += GetOHLCArray(TradingSymbol, PERIOD_H4, 50);
    json += ",";
    
-   // Get and add 1D DATA
    json += "\"1D_DATA\":";
-   json += GetOHLCArray(TradingSymbol, PERIOD_D1, 100);
-   json += ",";
-   
-   // Get and add 1W DATA
-   json += "\"1W_DATA\":";
-   json += GetOHLCArray(TradingSymbol, PERIOD_W1, 52);
+   json += GetOHLCArray(TradingSymbol, PERIOD_D1, 50);
    json += ",";
    
    // Phase 6: Add current positions
@@ -1222,6 +1272,8 @@ string PrepareIntradayOHLCData()
    
    // Add strategy (empty string if not configured)
    json += "\"strategy\":\"" + StrategyName + "\",";
+   
+   json += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
    
    // Account details for AI context (balance, PnL)
    datetime now = TimeCurrent();
@@ -1299,8 +1351,9 @@ string GetCurrentPositions()
       {
          string symbol = PositionGetString(POSITION_SYMBOL);
          
-         // Only include positions for our symbol
-         if(symbol == TradingSymbol)
+         // Only include positions for our symbol and magic number
+         if(symbol == TradingSymbol &&
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
          {
             if(count > 0) json += ",";
             
@@ -1445,111 +1498,72 @@ int GetCandleCount(string tf)
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Extract string value from JSON                           |
+//| Read top-level string from flat API JSON                         |
 //+------------------------------------------------------------------+
-string ExtractJSONString(string json, string key)
+string ReadJsonString(string json, string key)
 {
+   string nullKey = "\"" + key + "\":null";
+   if(StringFind(json, nullKey) >= 0)
+      return "";
+   
    string searchKey = "\"" + key + "\":\"";
    int start = StringFind(json, searchKey);
-   
-   if(start == -1) return "";
+   if(start == -1)
+      return "";
    
    start += StringLen(searchKey);
    int end = StringFind(json, "\"", start);
-   
-   if(end == -1) return "";
+   if(end == -1)
+      return "";
    
    return StringSubstr(json, start, end - start);
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Extract nested string value from JSON                    |
+//| Read top-level number from flat API JSON (null → 0)              |
 //+------------------------------------------------------------------+
-string ExtractNestedJSONString(string json, string parentKey, string childKey)
+double ReadJsonDouble(string json, string key)
 {
-   string searchParent = "\"" + parentKey + "\":{";
-   int parentStart = StringFind(json, searchParent);
-   
-   if(parentStart == -1) return "";
-   
-   int parentEnd = StringFind(json, "}", parentStart);
-   if(parentEnd == -1) return "";
-   
-   string parentSection = StringSubstr(json, parentStart, parentEnd - parentStart);
-   
-   return ExtractJSONString(parentSection, childKey);
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Extract nested double value from JSON                    |
-//+------------------------------------------------------------------+
-double ExtractNestedJSONDouble(string json, string parentKey, string childKey)
-{
-   string searchParent = "\"" + parentKey + "\":{";
-   int parentStart = StringFind(json, searchParent);
-   
-   if(parentStart == -1) return 0;
-   
-   int parentEnd = StringFind(json, "}", parentStart);
-   if(parentEnd == -1) return 0;
-   
-   string parentSection = StringSubstr(json, parentStart, parentEnd - parentStart);
-   
-   string searchKey = "\"" + childKey + "\":";
-   int start = StringFind(parentSection, searchKey);
-   
-   if(start == -1) return 0;
+   string searchKey = "\"" + key + "\":";
+   int start = StringFind(json, searchKey);
+   if(start == -1)
+      return 0;
    
    start += StringLen(searchKey);
-   
-   // Skip whitespace
-   while(StringGetCharacter(parentSection, start) == ' ' || 
-         StringGetCharacter(parentSection, start) == '\n' ||
-         StringGetCharacter(parentSection, start) == '\r')
+   while(start < StringLen(json))
    {
+      ushort ch = StringGetCharacter(json, start);
+      if(ch != ' ' && ch != '\n' && ch != '\r')
+         break;
       start++;
    }
    
-   // Check for null
-   if(StringSubstr(parentSection, start, 4) == "null") return 0;
+   if(StringSubstr(json, start, 4) == "null")
+      return 0;
    
    int end = start;
-   while(end < StringLen(parentSection))
+   while(end < StringLen(json))
    {
-      ushort ch = StringGetCharacter(parentSection, end);
-      if(ch != '0' && ch != '1' && ch != '2' && ch != '3' && ch != '4' && 
-         ch != '5' && ch != '6' && ch != '7' && ch != '8' && ch != '9' && 
+      ushort ch = StringGetCharacter(json, end);
+      if(ch != '0' && ch != '1' && ch != '2' && ch != '3' && ch != '4' &&
+         ch != '5' && ch != '6' && ch != '7' && ch != '8' && ch != '9' &&
          ch != '.' && ch != '-')
          break;
       end++;
    }
    
-   string value = StringSubstr(parentSection, start, end - start);
-   return StringToDouble(value);
+   return StringToDouble(StringSubstr(json, start, end - start));
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Extract array from JSON as comma-separated string        |
+//| Read top-level boolean from flat API JSON                        |
 //+------------------------------------------------------------------+
-string ExtractJSONArray(string json, string key)
+bool ReadJsonBool(string json, string key)
 {
-   string searchKey = "\"" + key + "\":[";
-   int start = StringFind(json, searchKey);
-   
-   if(start == -1) return "";
-   
-   start += StringLen(searchKey);
-   int end = StringFind(json, "]", start);
-   
-   if(end == -1) return "";
-   
-   string arrayContent = StringSubstr(json, start, end - start);
-   
-   // Remove extra spaces
-   StringTrimLeft(arrayContent);
-   StringTrimRight(arrayContent);
-   
-   return arrayContent;
+   string t = "\"" + key + "\":true";
+   if(StringFind(json, t) >= 0)
+      return true;
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -1567,6 +1581,7 @@ bool StoreCurrentPositions()
    // Build payload
    string payload = "{";
    payload += "\"symbol\":\"" + TradingSymbol + "\",";
+   payload += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
    payload += "\"positions\":" + positionsJSON;
    payload += "}";
    
@@ -1609,142 +1624,6 @@ bool StoreCurrentPositions()
       }
       return false;
    }
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Extract nested-nested string value from JSON             |
-//| For: response → manage_order → position → asset                  |
-//+------------------------------------------------------------------+
-string ExtractNestedNestedJSONString(string json, string parent1Key, string parent2Key, string childKey)
-{
-   // Find parent1
-   string searchParent1 = "\"" + parent1Key + "\":{";
-   int parent1Start = StringFind(json, searchParent1);
-   if(parent1Start == -1) return "";
-   
-   int parent1End = FindMatchingBrace(json, parent1Start + StringLen(searchParent1) - 1);
-   if(parent1End == -1) return "";
-   
-   string parent1Section = StringSubstr(json, parent1Start, parent1End - parent1Start + 1);
-   
-   // Find parent2 within parent1
-   string searchParent2 = "\"" + parent2Key + "\":{";
-   int parent2Start = StringFind(parent1Section, searchParent2);
-   if(parent2Start == -1) return "";
-   
-   int parent2End = FindMatchingBrace(parent1Section, parent2Start + StringLen(searchParent2) - 1);
-   if(parent2End == -1) return "";
-   
-   string parent2Section = StringSubstr(parent1Section, parent2Start, parent2End - parent2Start + 1);
-   
-   // Extract child string from parent2
-   return ExtractJSONString(parent2Section, childKey);
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Extract nested-nested double value from JSON             |
-//+------------------------------------------------------------------+
-double ExtractNestedNestedJSONDouble(string json, string parent1Key, string parent2Key, string childKey)
-{
-   // Find parent1
-   string searchParent1 = "\"" + parent1Key + "\":{";
-   int parent1Start = StringFind(json, searchParent1);
-   if(parent1Start == -1) return 0;
-   
-   int parent1End = FindMatchingBrace(json, parent1Start + StringLen(searchParent1) - 1);
-   if(parent1End == -1) return 0;
-   
-   string parent1Section = StringSubstr(json, parent1Start, parent1End - parent1Start + 1);
-   
-   // Find parent2 within parent1
-   string searchParent2 = "\"" + parent2Key + "\":{";
-   int parent2Start = StringFind(parent1Section, searchParent2);
-   if(parent2Start == -1) return 0;
-   
-   int parent2End = FindMatchingBrace(parent1Section, parent2Start + StringLen(searchParent2) - 1);
-   if(parent2End == -1) return 0;
-   
-   string parent2Section = StringSubstr(parent1Section, parent2Start, parent2End - parent2Start + 1);
-   
-   // Extract child value from parent2
-   string searchKey = "\"" + childKey + "\":";
-   int start = StringFind(parent2Section, searchKey);
-   if(start == -1) return 0;
-   
-   start += StringLen(searchKey);
-   
-   // Skip whitespace
-   while(StringGetCharacter(parent2Section, start) == ' ')
-      start++;
-   
-   // Check for null
-   if(StringSubstr(parent2Section, start, 4) == "null") return 0;
-   
-   int end = start;
-   while(end < StringLen(parent2Section))
-   {
-      ushort ch = StringGetCharacter(parent2Section, end);
-      if(ch != '0' && ch != '1' && ch != '2' && ch != '3' && ch != '4' && 
-         ch != '5' && ch != '6' && ch != '7' && ch != '8' && ch != '9' && 
-         ch != '.' && ch != '-')
-         break;
-      end++;
-   }
-   
-   string value = StringSubstr(parent2Section, start, end - start);
-   return StringToDouble(value);
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Extract nested boolean value from JSON                   |
-//+------------------------------------------------------------------+
-bool ExtractNestedJSONBool(string json, string parentKey, string childKey)
-{
-   string searchParent = "\"" + parentKey + "\":{";
-   int parentStart = StringFind(json, searchParent);
-   if(parentStart == -1) return false;
-   
-   int parentEnd = FindMatchingBrace(json, parentStart + StringLen(searchParent) - 1);
-   if(parentEnd == -1) return false;
-   
-   string parentSection = StringSubstr(json, parentStart, parentEnd - parentStart + 1);
-   
-   string searchKey = "\"" + childKey + "\":";
-   int start = StringFind(parentSection, searchKey);
-   if(start == -1) return false;
-   
-   start += StringLen(searchKey);
-   
-   // Skip whitespace
-   while(StringGetCharacter(parentSection, start) == ' ')
-      start++;
-   
-   // Check for true/false
-   if(StringSubstr(parentSection, start, 4) == "true") return true;
-   if(StringSubstr(parentSection, start, 5) == "false") return false;
-   if(StringSubstr(parentSection, start, 4) == "null") return false;
-   
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Find matching closing brace                              |
-//+------------------------------------------------------------------+
-int FindMatchingBrace(string json, int startPos)
-{
-   int depth = 1;
-   int pos = startPos + 1;
-   
-   while(pos < StringLen(json) && depth > 0)
-   {
-      ushort ch = StringGetCharacter(json, pos);
-      if(ch == '{') depth++;
-      if(ch == '}') depth--;
-      if(depth == 0) return pos;
-      pos++;
-   }
-   
-   return -1;
 }
 
 //+------------------------------------------------------------------+

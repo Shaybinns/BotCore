@@ -13,10 +13,11 @@ from flask_cors import CORS
 import os
 import json
 from dotenv import load_dotenv
-from brain import sod_action, intraday_action
+from brain import sod_action, intraday_action, _flatten_for_ea, _bot_action_for_api
 from database import (
     store_current_positions,
     get_current_positions,
+    get_bot_action,
     save_strategy,
     get_strategy,
     list_strategies,
@@ -40,6 +41,22 @@ def _float_or_none(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_magic_number(data: dict):
+    """
+    EA magic number — required on trading endpoints.
+    Returns (magic_number, error_message). error_message is None on success.
+    """
+    if data.get("magic_number") is None:
+        return None, "Missing required field: magic_number"
+    try:
+        magic_number = int(data["magic_number"])
+    except (TypeError, ValueError):
+        return None, "magic_number must be a positive integer"
+    if magic_number <= 0:
+        return None, "magic_number must be a positive integer"
+    return magic_number, None
 
 
 @app.route("/api/health", methods=["GET"])
@@ -98,12 +115,12 @@ def cron_morning_market_brief():
 
     try:
         from market_data import get_market_data
-        from database import save_analysis_note
+        from database import save_market_data_cache
         from telegram_notify import send_market_brief_to_telegram
 
         data = get_market_data(symbol)
         data["_morning_brief"] = True
-        saved = save_analysis_note("GLOBAL", "market_data_note", data, strategy_name="")
+        saved = save_market_data_cache(data)
         if not saved:
             return jsonify({
                 "success": False,
@@ -133,20 +150,8 @@ def trading_sod():
     Expected payload:
     {
         "symbol": "GBPUSD",
-        "1h_DATA": [
-            {
-                "time": 1704067200,
-                "open": 1.08500,
-                "high": 1.08600,
-                "low": 1.08400,
-                "close": 1.08550,
-                "volume": 1234
-            },
-            ...
-        ],
         "4h_DATA": [...],
-        "1D_DATA": [...],
-        "1W_DATA": [...]
+        "1D_DATA": [...]
     }
     """
     try:
@@ -157,17 +162,19 @@ def trading_sod():
         
         # Validate required fields
         symbol = data.get("symbol")
-        h1_data = data.get("1h_DATA")
         h4_data = data.get("4h_DATA")
         d1_data = data.get("1D_DATA")
-        w1_data = data.get("1W_DATA")
         
         if not symbol:
             return jsonify({"error": "Missing required field: symbol"}), 400
+
+        magic_number, magic_err = _parse_magic_number(data)
+        if magic_err:
+            return jsonify({"error": magic_err}), 400
         
-        if not h1_data or not h4_data or not d1_data or not w1_data:
+        if not h4_data or not d1_data:
             return jsonify({
-                "error": "Missing required timeframe data: 1h_DATA, 4h_DATA, 1D_DATA, 1W_DATA"
+                "error": "Missing required timeframe data: 4h_DATA, 1D_DATA"
             }), 400
 
         # Extract positions and strategy — strategy is REQUIRED
@@ -194,6 +201,7 @@ def trading_sod():
         save_account_snapshot(
             symbol=symbol,
             strategy_name=strategy_name,
+            magic_number=magic_number,
             account_size=_float_or_none(data.get("account_size")),
             realised_pnl=_float_or_none(data.get("realised_pnl")),
             unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
@@ -206,20 +214,17 @@ def trading_sod():
         print("=" * 50)
         print(f"📊 Start of Day Data Received")
         print(f"Symbol: {symbol}")
-        print(f"1h candles: {len(h1_data)}")
+        print(f"Magic number: {magic_number}")
         print(f"4h candles: {len(h4_data)}")
         print(f"1D candles: {len(d1_data)}")
-        print(f"1W candles: {len(w1_data)}")
         if strategy_name:
             print(f"Strategy: {strategy_name}")
         print("=" * 50)
 
         # Prepare OHLC data in format expected by sod_action
         ohlc_data = {
-            "1h_DATA": h1_data,
             "4h_DATA": h4_data,
             "1D_DATA": d1_data,
-            "1W_DATA": w1_data
         }
 
         # Call sod_action in brain.py to perform comprehensive SOD analysis
@@ -227,8 +232,9 @@ def trading_sod():
         result = sod_action(
             symbol=symbol,
             ohlc_data=ohlc_data,
+            magic_number=magic_number,
             positions=positions,
-            strategy_name=strategy_name
+            strategy_name=strategy_name,
         )
         
         # Return the AI analysis result directly to the EA
@@ -274,13 +280,21 @@ def trading_intraday():
         # Extract OHLC data (flexible timeframes)
         ohlc_data = {}
         for key, value in data.items():
-            if key not in ("symbol", "positions", "strategy") and key.endswith("_DATA"):
+            if key not in (
+                "symbol", "positions", "strategy", "magic_number",
+                "account_size", "realised_pnl", "unrealised_pnl",
+                "today_realised_pnl", "week_pnl", "month_pnl",
+            ) and key.endswith("_DATA"):
                 ohlc_data[key] = value
 
         if not ohlc_data:
             return jsonify({
                 "error": "No OHLC data provided. Include at least one timeframe (e.g., H1_DATA, M15_DATA)"
             }), 400
+
+        magic_number, magic_err = _parse_magic_number(data)
+        if magic_err:
+            return jsonify({"error": magic_err}), 400
 
         # Extract positions and strategy — strategy is REQUIRED
         positions     = data.get("positions", [])
@@ -306,6 +320,7 @@ def trading_intraday():
         save_account_snapshot(
             symbol=symbol,
             strategy_name=strategy_name,
+            magic_number=magic_number,
             account_size=_float_or_none(data.get("account_size")),
             realised_pnl=_float_or_none(data.get("realised_pnl")),
             unrealised_pnl=_float_or_none(data.get("unrealised_pnl")),
@@ -318,6 +333,7 @@ def trading_intraday():
         print("=" * 50)
         print(f"📈 Intraday Analysis Request Received")
         print(f"Symbol: {symbol}")
+        print(f"Magic number: {magic_number}")
         print(f"Timeframes: {list(ohlc_data.keys())}")
         print(f"Positions: {len(positions)} open")
         if strategy_name:
@@ -328,8 +344,9 @@ def trading_intraday():
         result = intraday_action(
             symbol=symbol,
             ohlc_data=ohlc_data,
+            magic_number=magic_number,
             positions=positions,
-            strategy_name=strategy_name
+            strategy_name=strategy_name,
         )
         
         # Return the AI analysis result directly to the EA
@@ -501,18 +518,23 @@ def store_positions():
         
         symbol = data.get("symbol")
         positions = data.get("positions", [])
-        
+
         if not symbol:
             return jsonify({"error": "Missing required field: symbol"}), 400
+
+        magic_number, magic_err = _parse_magic_number(data)
+        if magic_err:
+            return jsonify({"error": magic_err}), 400
         
         # Store positions in database
-        success = store_current_positions(symbol, positions)
+        success = store_current_positions(symbol, positions, magic_number)
         
         if success:
             return jsonify({
                 "status": "success",
                 "positions_stored": len(positions),
-                "symbol": symbol
+                "symbol": symbol,
+                "magic_number": magic_number,
             }), 200
         else:
             return jsonify({
@@ -523,6 +545,42 @@ def store_positions():
         return jsonify({
             "error": f"Internal server error: {str(e)}"
         }), 500
+
+
+@app.route("/api/trading/bot_action", methods=["GET"])
+def trading_bot_action_get():
+    """
+    Return the canonical bot_action row for an EA instance (scheduling + trade payloads).
+
+    Query: magic_number (required, positive integer)
+    """
+    try:
+        magic_number, magic_err = _parse_magic_number(
+            {"magic_number": request.args.get("magic_number")}
+        )
+        if magic_err:
+            return jsonify({"error": magic_err}), 400
+
+        row = get_bot_action(magic_number)
+        wrapped = {
+            "bot_action": _bot_action_for_api(row) if row else {
+                "next_review_time": None,
+                "action_type": None,
+                "enter": None,
+                "manage": None,
+                "exit": None,
+            },
+            "monitoring_timeframes": "M5,H1",
+        }
+        flat = _flatten_for_ea(wrapped, "sod_analysis", magic_number)
+        flat.pop("sod_analysis", None)
+        return jsonify({
+            "success": True,
+            **flat,
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # =============================================================================
@@ -685,6 +743,7 @@ def not_found(error):
             "/api/trading/execute",
             "/api/trading/status",
             "/api/trading/store_positions",
+            "GET /api/trading/bot_action?magic_number=N",
             "/api/strategies",
             "/api/strategies/<name>",
             "PUT /api/strategies/<name>"
@@ -699,20 +758,30 @@ def internal_error(error):
     }), 500
 
 
-def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = None) -> str:
+def _build_chat_context(
+    symbol: str,
+    user_id: str = None,
+    strategy_name: str = None,
+    magic_number: int = None,
+) -> str:
     """
     Load all available context from the DB and assemble it into a single
     context string for the chat assistant.
 
     Reads (never fetches live):
       - active strategy   — name + full prompt text (if strategy_name provided)
-      - market_data_note  — synthesized market intelligence (unscoped, global)
-      - sod_note          — today's SOD analysis, scoped to (symbol, strategy_name)
-      - last_run_note     — most recent intraday analysis, scoped to (symbol, strategy_name)
+      - market_data_cache — synthesized market intelligence (global)
+      - sod_analysis / intraday_analysis — scoped to (magic_number, symbol, strategy_name)
       - current_positions — live open positions
       - recent_messages   — user's conversation history (if user_id provided)
     """
-    from database import get_analysis_note, get_current_positions, get_strategy, get_account_context_for_analysis
+    from database import (
+        get_analysis_record,
+        get_market_data_cache,
+        get_current_positions,
+        get_strategy,
+        get_account_context_for_analysis,
+    )
     from datetime import datetime, timezone
 
     scoped_strategy = strategy_name or ''
@@ -721,11 +790,15 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
         f"CURRENT TIME: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"SYMBOL IN FOCUS: {symbol}",
         f"ACTIVE STRATEGY: {strategy_name if strategy_name else 'None specified'}",
+        f"MAGIC NUMBER: {magic_number if magic_number else 'Not specified'}",
         ""
     ]
 
     # Latest account snapshot (balance, PnL) for this symbol/strategy
-    account_ctx = get_account_context_for_analysis(symbol, scoped_strategy)
+    if magic_number:
+        account_ctx = get_account_context_for_analysis(magic_number)
+    else:
+        account_ctx = get_account_context_for_analysis(0)
     if any(account_ctx.get(k) is not None for k in ("account_size", "realised_pnl", "unrealised_pnl", "today_realised_pnl", "week_pnl", "month_pnl")):
         parts += [
             "=== ACCOUNT (latest snapshot) ===",
@@ -738,7 +811,7 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
             ""
         ]
     else:
-        parts += ["=== ACCOUNT ===", "No account snapshots yet for this symbol/strategy.", ""]
+        parts += ["=== ACCOUNT ===", "No account snapshot yet for this magic_number.", ""]
 
     # Strategy details — show name and full rules so the assistant can discuss them
     if strategy_name:
@@ -756,7 +829,7 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
     else:
         parts += ["=== ACTIVE STRATEGY ===", "No strategy specified in this request.", ""]
 
-    market_intel = get_analysis_note('GLOBAL', 'market_data_note', strategy_name='')
+    market_intel = get_market_data_cache()
     if market_intel:
         fetched_at = market_intel.get('_fetched_at') or market_intel.get('_db_created_at', 'unknown')
         parts += [
@@ -766,32 +839,47 @@ def _build_chat_context(symbol: str, user_id: str = None, strategy_name: str = N
             ""
         ]
     else:
-        parts += ["=== MARKET INTELLIGENCE ===", "Not yet available — SOD has not run today.", ""]
+        parts += ["=== MARKET INTELLIGENCE ===", "Not yet available.", ""]
 
-    sod_note = get_analysis_note(symbol, 'sod_note', strategy_name=scoped_strategy)
-    if sod_note:
+    if magic_number:
+        analysis_record = get_analysis_record(magic_number, symbol, scoped_strategy)
+        sod_text = analysis_record.get("sod_analysis") if analysis_record else None
+        intraday_text = analysis_record.get("intraday_analysis") if analysis_record else None
+        updated_at = analysis_record.get("_db_updated_at") if analysis_record else None
+
+        if sod_text:
+            parts += [
+                "=== TODAY'S SOD ANALYSIS ===",
+                f"(updated {updated_at})" if updated_at else "",
+                sod_text,
+                ""
+            ]
+        else:
+            parts += [
+                "=== TODAY'S SOD ANALYSIS ===",
+                f"Not yet available for magic {magic_number}.",
+                ""
+            ]
+
+        if intraday_text:
+            parts += [
+                "=== LAST INTRADAY ANALYSIS ===",
+                intraday_text,
+                ""
+            ]
+        else:
+            parts += ["=== LAST INTRADAY ANALYSIS ===", "No intraday runs yet today.", ""]
+    else:
         parts += [
-            "=== TODAY'S SOD ANALYSIS (trading plan and bias) ===",
-            json.dumps({k: v for k, v in sod_note.items()
-                        if not k.startswith('_')}, indent=2),
+            "=== ANALYSIS NOTES ===",
+            "Provide magic_number in the chat request to load SOD/intraday analysis for a specific EA instance.",
             ""
         ]
-    else:
-        label = f"for strategy '{strategy_name}'" if strategy_name else "— SOD has not run today"
-        parts += ["=== TODAY'S SOD ANALYSIS ===", f"Not yet available {label}.", ""]
 
-    last_run = get_analysis_note(symbol, 'last_run_note', strategy_name=scoped_strategy)
-    if last_run:
-        parts += [
-            "=== LAST INTRADAY ANALYSIS ===",
-            json.dumps({k: v for k, v in last_run.items()
-                        if not k.startswith('_')}, indent=2),
-            ""
-        ]
+    if magic_number:
+        positions = get_current_positions(symbol, magic_number)
     else:
-        parts += ["=== LAST INTRADAY ANALYSIS ===", "No intraday runs yet today.", ""]
-
-    positions = get_current_positions(symbol)
+        positions = get_current_positions(symbol, 0)
     if positions:
         parts += [
             "=== CURRENT OPEN POSITIONS ===",
@@ -843,6 +931,11 @@ def chat():
         symbol        = data.get("symbol", "GBPUSD").upper()
         user_id       = data.get("user_id")
         strategy_name = (data.get("strategy") or "").strip() or None
+        magic_number = None
+        if data.get("magic_number") is not None:
+            magic_number, magic_err = _parse_magic_number(data)
+            if magic_err:
+                return jsonify({"error": magic_err}), 400
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -854,7 +947,9 @@ def chat():
         from openai import OpenAI
         from prompt import compose_botcore_prompt
 
-        context = _build_chat_context(symbol, user_id, strategy_name=strategy_name)
+        context = _build_chat_context(
+            symbol, user_id, strategy_name=strategy_name, magic_number=magic_number,
+        )
         client  = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
@@ -915,6 +1010,11 @@ def chat_stream():
         symbol        = data.get("symbol", "GBPUSD").upper()
         user_id       = data.get("user_id")
         strategy_name = (data.get("strategy") or "").strip() or None
+        magic_number = None
+        if data.get("magic_number") is not None:
+            magic_number, magic_err = _parse_magic_number(data)
+            if magic_err:
+                return jsonify({"error": magic_err}), 400
 
         if not message:
             return jsonify({"error": "Missing message"}), 400
@@ -923,7 +1023,9 @@ def chat_stream():
         if not openai_key:
             return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
 
-        context = _build_chat_context(symbol, user_id, strategy_name=strategy_name)
+        context = _build_chat_context(
+            symbol, user_id, strategy_name=strategy_name, magic_number=magic_number,
+        )
 
         def generate():
             full_reply = []
