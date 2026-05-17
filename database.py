@@ -9,7 +9,7 @@ Database Layer - PostgreSQL Integration
   trade_events      — append-only audit log of EA execution confirmations
   users             — chat interface user accounts and message history
   strategies        — named strategy prompts, selectable per EA instance
-  account_snapshots — per-run account metrics (balance, PnL) for AI context
+  account_snapshots — latest account metrics per magic_number (upsert)
 
   test_inputs — one row per AI run (all test fields in a single table)
 """
@@ -239,6 +239,56 @@ def init_database():
         "CREATE INDEX IF NOT EXISTS idx_account_snapshots_magic_symbol_strategy_created "
         "ON account_snapshots(magic_number, symbol, strategy_name, created_at DESC)"
     )
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name       VARCHAR(100) PRIMARY KEY,
+            applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # One-time wipe of append-only snapshot history before magic_number-only storage.
+    cursor.execute("""
+        INSERT INTO schema_migrations (name)
+        VALUES ('account_snapshots_wipe_legacy')
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name
+    """)
+    if cursor.fetchone():
+        cursor.execute("TRUNCATE account_snapshots RESTART IDENTITY")
+        print("[db] account_snapshots: legacy rows wiped (one-time migration)")
+
+    # One live row per magic_number — migrate off old composite UNIQUE if present.
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'account_snapshots_magic_symbol_strategy_key'
+            ) THEN
+                ALTER TABLE account_snapshots
+                    DROP CONSTRAINT account_snapshots_magic_symbol_strategy_key;
+            END IF;
+        END $$
+    """)
+    cursor.execute("""
+        DELETE FROM account_snapshots a
+        USING account_snapshots b
+        WHERE a.magic_number = b.magic_number
+          AND a.id < b.id
+    """)
+    cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'account_snapshots_magic_number_key'
+            ) THEN
+                ALTER TABLE account_snapshots
+                    ADD CONSTRAINT account_snapshots_magic_number_key
+                    UNIQUE (magic_number);
+            END IF;
+        END $$
+    """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS test_inputs (
@@ -939,8 +989,7 @@ def delete_strategy(strategy_name: str) -> bool:
 
 # =============================================================================
 # ACCOUNT SNAPSHOTS
-# One row per SOD/intraday run. Used to build account context for the AI
-# (summary + first 10 and last 10 snapshots). All PnL values can be null.
+# One row per magic_number — overwritten each SOD/intraday (symbol/strategy stored for reference).
 # =============================================================================
 
 def save_account_snapshot(
@@ -954,7 +1003,7 @@ def save_account_snapshot(
     week_pnl: Optional[float] = None,
     month_pnl: Optional[float] = None,
 ) -> bool:
-    """Append one account snapshot for this EA run (magic_number + symbol + strategy)."""
+    """Upsert latest account metrics for this EA (keyed by magic_number only)."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -963,6 +1012,17 @@ def save_account_snapshot(
             (magic_number, symbol, strategy_name, account_size, realised_pnl, unrealised_pnl,
              today_realised_pnl, week_pnl, month_pnl)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (magic_number)
+            DO UPDATE SET
+                symbol             = EXCLUDED.symbol,
+                strategy_name      = EXCLUDED.strategy_name,
+                account_size       = EXCLUDED.account_size,
+                realised_pnl       = EXCLUDED.realised_pnl,
+                unrealised_pnl     = EXCLUDED.unrealised_pnl,
+                today_realised_pnl = EXCLUDED.today_realised_pnl,
+                week_pnl           = EXCLUDED.week_pnl,
+                month_pnl          = EXCLUDED.month_pnl,
+                created_at         = CURRENT_TIMESTAMP
         """, (
             magic_number,
             symbol,
@@ -983,77 +1043,42 @@ def save_account_snapshot(
         return False
 
 
-def get_account_context_for_analysis(
-    symbol: str,
-    strategy_name: str,
-    magic_number: int,
-) -> Dict[str, Any]:
-    """
-    Return account context for the AI: latest summary plus first 10 and last 10
-    snapshots (by created_at), scoped to magic_number + symbol + strategy.
-    """
+def get_account_context_for_analysis(magic_number: int) -> Dict[str, Any]:
+    """Return the account snapshot for this magic_number (one row per bot instance)."""
     result = {
+        "magic_number": magic_number,
+        "symbol": None,
+        "strategy_name": None,
         "account_size": None,
         "realised_pnl": None,
         "unrealised_pnl": None,
         "today_realised_pnl": None,
         "week_pnl": None,
         "month_pnl": None,
-        "first_10": [],
-        "last_10": [],
+        "snapshot_at": None,
     }
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        scoped_strategy = strategy_name or ''
 
-        # Latest snapshot for summary
         cursor.execute("""
-            SELECT account_size, realised_pnl, unrealised_pnl,
+            SELECT symbol, strategy_name, account_size, realised_pnl, unrealised_pnl,
                    today_realised_pnl, week_pnl, month_pnl, created_at
             FROM account_snapshots
-            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
-            ORDER BY created_at DESC
+            WHERE magic_number = %s
             LIMIT 1
-        """, (magic_number, symbol, scoped_strategy))
+        """, (magic_number,))
         row = cursor.fetchone()
         if row:
-            result["account_size"] = float(row[0]) if row[0] is not None else None
-            result["realised_pnl"] = float(row[1]) if row[1] is not None else None
-            result["unrealised_pnl"] = float(row[2]) if row[2] is not None else None
-            result["today_realised_pnl"] = float(row[3]) if row[3] is not None else None
-            result["week_pnl"] = float(row[4]) if row[4] is not None else None
-            result["month_pnl"] = float(row[5]) if row[5] is not None else None
-
-        # First 10 (oldest) and last 10 (newest) snapshots — two separate queries to avoid duplicates
-        def row_to_dict(r):
-            return {
-                "account_size": float(r[0]) if r[0] is not None else None,
-                "realised_pnl": float(r[1]) if r[1] is not None else None,
-                "unrealised_pnl": float(r[2]) if r[2] is not None else None,
-                "today_realised_pnl": float(r[3]) if r[3] is not None else None,
-                "week_pnl": float(r[4]) if r[4] is not None else None,
-                "month_pnl": float(r[5]) if r[5] is not None else None,
-                "created_at": r[6].isoformat() if r[6] else None,
-            }
-        cursor.execute("""
-            SELECT account_size, realised_pnl, unrealised_pnl,
-                   today_realised_pnl, week_pnl, month_pnl, created_at
-            FROM account_snapshots
-            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
-            ORDER BY created_at ASC
-            LIMIT 10
-        """, (magic_number, symbol, scoped_strategy))
-        result["first_10"] = [row_to_dict(r) for r in cursor.fetchall()]
-        cursor.execute("""
-            SELECT account_size, realised_pnl, unrealised_pnl,
-                   today_realised_pnl, week_pnl, month_pnl, created_at
-            FROM account_snapshots
-            WHERE magic_number = %s AND symbol = %s AND strategy_name = %s
-            ORDER BY created_at DESC
-            LIMIT 10
-        """, (magic_number, symbol, scoped_strategy))
-        result["last_10"] = [row_to_dict(r) for r in cursor.fetchall()]
+            result["symbol"] = row[0]
+            result["strategy_name"] = row[1]
+            result["account_size"] = float(row[2]) if row[2] is not None else None
+            result["realised_pnl"] = float(row[3]) if row[3] is not None else None
+            result["unrealised_pnl"] = float(row[4]) if row[4] is not None else None
+            result["today_realised_pnl"] = float(row[5]) if row[5] is not None else None
+            result["week_pnl"] = float(row[6]) if row[6] is not None else None
+            result["month_pnl"] = float(row[7]) if row[7] is not None else None
+            result["snapshot_at"] = row[8].isoformat() if row[8] else None
 
         cursor.close()
         conn.close()
