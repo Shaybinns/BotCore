@@ -160,7 +160,8 @@ ENTER:
     "direction": "BUY",
     "entry_price": 1.27005,
     "stop_loss": 1.26850,
-    "take_profit": 1.27500
+    "take_profit": 1.27500,
+    "risk_percentage": 1
   }
 }
 
@@ -188,7 +189,7 @@ FIELD RULES:
 - next_review_time: London local time, no Z. Must be in the future. Must NOT be 07:00 London (automatic SOD). When you will run your first intraday check and what you expect by then.
 - monitoring_timeframes: JSON array of MT5 codes for the timeframes you will next be analysing (M1, M5, M15, M30, H1, H4, D1, W1 only).
 - executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match trade_id from OPEN POSITIONS in context.
-  - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number } - all cannot be null.
+  - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number, "risk_percentage": number } — all required when action_type is ENTER. risk_percentage is a whole number (1 = 1% account risk, 2 = 2%); EA sizes lots from entry, stop_loss, and this value.
   - MANAGE: "manage": { "trade_id": number, "new_stop_loss": number or null, "new_take_profit": number or null, "new_position_percentage": number or null } - can be null if you are not changing the field. 
   - EXIT: "exit": { "trade_id": number } — full close only; do not use MANAGE to close
 
@@ -299,7 +300,8 @@ ENTER:
     "direction": "BUY",
     "entry_price": 1.27005,
     "stop_loss": 1.26850,
-    "take_profit": 1.27500
+    "take_profit": 1.27500,
+    "risk_percentage": 1
   }
 }
 
@@ -327,7 +329,7 @@ FIELD RULES:
 - next_review_time: London local time, no Z. Must be in the future. Must NOT be 07:00 London (automatic SOD). When you will run your first intraday check and what you expect by then.
 - monitoring_timeframes: JSON array of MT5 codes for the timeframes you will next be analysing (M1, M5, M15, M30, H1, H4, D1, W1 only).
 - executions.action_type: "ENTER", "MANAGE", "EXIT", or null. trade_id must match trade_id from OPEN POSITIONS in context.
-  - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number } - all cannot be null.
+  - ENTER: "enter": { "symbol", "direction": "BUY"|"SELL", "entry_price": number, "stop_loss": number, "take_profit": number, "risk_percentage": number } — all required when action_type is ENTER. risk_percentage is a whole number (1 = 1% account risk, 2 = 2%); EA sizes lots from entry, stop_loss, and this value.
   - MANAGE: "manage": { "trade_id": number, "new_stop_loss": number or null, "new_take_profit": number or null, "new_position_percentage": number or null } - can be null if you are not changing the field. 
   - EXIT: "exit": { "trade_id": number } — full close only; do not use MANAGE to close
 
@@ -549,15 +551,14 @@ After calculating SL, compute the distance in points:
 - Sell: SL_distance = (SL − entry) / point_value
 - Buy: SL_distance = (entry − SL) / point_value
 
-This distance drives lot size calculation (Section 6).
-Log the SL distance for every order placed.
+This distance is used by the EA for lot sizing — you do not calculate lots.
 
 NEVER:
 - Move the SL in a direction that increases risk.
 - Place SL inside the candle range (must be beyond the extreme).
 
 ----------------------------------------------------------------
-SECTION 6 — TAKE PROFIT AND POSITION SIZING
+SECTION 6 — TAKE PROFIT AND RISK
 ----------------------------------------------------------------
 
 TAKE PROFIT — STRUCTURE-ADJUSTED:
@@ -587,28 +588,14 @@ MINIMUM TP: Never set TP closer than 3R. If the nearest structural level is insi
 
 TP is fixed at order placement. Do not move TP after entry.
 
-POSITION SIZING:
-- If the market bias matches the direction of the trade setup, and points to the probability of the movement happening during the London session — then you can enter the trade with 1-2% risk.
-- IF the market bias is the opposite of the direction of the trade setup, and points to the probability of the movement happening during the London session — then you must enter the trade with 0.5% risk.
-- Any other instance, enter the trade with 1% risk.
+POSITION SIZING (risk_percentage only — EA calculates lots):
+Choose account risk per setup using the rules below. Output as risk_percentage in executions.enter (whole number: 1 = 1%, 0.5 = 0.5%, 2 = 2%). Required on every ENTER.
 
-LOT SIZE CALCULATION:
-Lot size scales inversely with SL distance to maintain consistent risk per setup:
+- Bias aligned with trade direction and London session probability → 1–2% (use 1 or 2).
+- Bias opposite to trade direction but London session still in play → 0.5%.
+- All other cases → 1%.
 
-  lot_size = (100 / SL_distance_in_points) × InputBaseLotSize
-
-InputBaseLotSize represents the desired lot size when SL distance is exactly 100 points. At a 50-point SL, lot size doubles; at a 200-point SL, lot size halves.
-
-InputBaseLotSize = 0.1 lots, per 10k USD in trading account.
-If account is worth 100k USD, InputBaseLotSize = 1.0 lots.
-If account is worth 1k USD, InputBaseLotSize = 0.01 lots.
-Treat GBP accounts and USD accounts as 1GBP = 1.3USD.
-
-After calculating:
-- Round to nearest lot step (SYMBOL_VOLUME_STEP)
-- Apply broker minimum volume (SYMBOL_VOLUME_MIN)
-- Apply broker maximum volume (SYMBOL_VOLUME_MAX)
-- Log the final lot size and SL distance for every order.
+Do not calculate lot size, InputBaseLotSize, or volume — the EA sizes from entry_price, stop_loss, and risk_percentage automatically.
 
 ----------------------------------------------------------------
 SECTION 7 — TRADE MANAGEMENT

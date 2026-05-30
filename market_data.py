@@ -109,9 +109,10 @@ def fetch_macro_and_fed() -> str:
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    prompt = f"""You are a forex market analyst. Current time: {current_time} (today is {current_date}).
+    prompt = f"""You are a forex macro strategist preparing FORWARD-LOOKING intelligence for intraday/swing traders.
+Current time: {current_time} (today is {current_date}).
 
-Search authoritative sources and provide concise, current macro intelligence relevant to forex trading:
+Your job is what comes NEXT — not a recap of last week's data. Search authoritative sources (Fed, BLS, BEA, Investing.com, central banks).
 
 === PART 1: KEY MACRO DATA ===
 Prioritize: Investing.com, Federal Reserve (federalreserve.gov), BLS, BEA
@@ -178,9 +179,10 @@ def fetch_catalysts_and_news() -> str:
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    prompt = f"""You are a forex market analyst. Current time: {current_time} (today is {current_date}).
+    prompt = f"""You are a forex catalyst desk preparing FORWARD-LOOKING event intelligence.
+Current time: {current_time} (today is {current_date}).
 
-Search authoritative sources and provide:
+Prioritize what will MOVE markets in the NEXT 48–72 HOURS — not yesterday's headlines.
 
 === PART 1: TODAY'S MARKET-MOVING NEWS ===
 Top 3-5 news items from TODAY ({current_date}) that affect forex markets:
@@ -204,7 +206,11 @@ For each event:
 - Any active geopolitical risks affecting safe havens (USD, JPY, Gold, CHF)?
 - Any scheduled events this week that could cause significant volatility?
 
-Be brief and actionable. A forex trader is reading this before entering trades."""
+=== PART 4: LAST 24H (brief — context only) ===
+Max 3 bullets: only news still affecting TODAY's and TOMORROW's positioning.
+Skip stale headlines already fully priced.
+
+Actionable and dated. A trader uses this to position BEFORE moves, not explain them after."""
 
     try:
         print("[market] Fetching catalysts/news from Perplexity...")
@@ -293,7 +299,15 @@ Key points to consider:
  - We mainly categorise the market as Goldilocks, Late Cycle, Reflation, Stagflation, Soft Landing, Hard Landing, Deflation, Geopolitical Stress, or a combination of two. 
 
 Analyse with the above framework in mind and always consider the intermarket relationships, upcoming news and general market sentiment and how this will effect the current daily session.
-Your analysis should point to a definitive point of action, something to wait for or something to act upon or take advantage of, if you need more data, DO NOT force anything, wait for the pieces to present themselves. 
+
+CRITICAL — PREDICTIVE NOT REACTIVE:
+- Lead with what is LIKELY to happen next (24–72h), not what already happened.
+- Past data and headlines are context only — use them to infer forward positioning and surprise risk.
+- Every outlook field must state direction AHEAD and what would change it.
+- key_takeaways must be actionable FORWARD hooks (what to watch, what to trade toward, what to avoid).
+- Do not write a news recap. Write a trading desk brief for decisions about to be made.
+
+Your analysis should point to a definitive forward stance: what to wait for, what to lean into, or what to avoid until the next catalyst. If the path is unclear, say so and name the data that will resolve it.
 
 
 You must output your analysis in the following format:
@@ -305,42 +319,48 @@ CRITICAL JSON RULES:
 
 Output this exact structure:
 {
-  "headline": "One punchy sentence capturing the current market environment",
+  "headline": "One punchy FORWARD-LOOKING sentence — what the market is positioning for next, not what happened yesterday",
 
   "market_regime": "One of: Goldilocks | Late Cycle | Reflation | Stagflation | Soft Landing | Hard Landing | Deflation | Geopolitical Stress",
 
   "risk_profile": "risk-on | risk-off | transitioning",
 
-  "market_summary": "200-300 word flowing analysis. Cover: current regime and why, risk-on/off evidence (VIX, DXY, Gold, yields), Fed stance vs market pricing, what this means for forex right now today in this session, intermarket relationships driving flows. Use \\n\\n between paragraphs.",
+  "forward_bias_24_48h": "3–5 sentences: base-case direction for risk and USD over the next 24–48h, driven by upcoming catalysts and current positioning. State what confirms or kills this view.",
+
+  "market_summary": "200–300 word flowing analysis. Lead with the forward path (next sessions, next releases). Then regime, intermarket flows, Fed vs market pricing. End with how a forex trader should lean TODAY given what is still ahead. Use \\n\\n between paragraphs.",
 
   "drivers_outlook": {
-    "dxy_outlook": "1-2 sentences: DXY direction, key drivers, intraday bias (bullish/bearish/neutral)",
-    "gold_outlook": "1-2 sentences: Gold direction, key drivers, intraday bias (bullish/bearish/neutral)",
-    "sp500_outlook": "1-2 sentences: S&P 500 direction, key drivers, intraday bias (bullish/bearish/neutral)",
-    "bitcoin_outlook": "1-2 sentences: Bitcoin direction, key drivers, intraday bias (bullish/bearish/neutral)",
-    "GBPUSD": "1-2 sentences: GBPUSD direction, key drivers, intraday bias (bullish/bearish/neutral)"
+    "dxy_outlook": "1–2 sentences: FORWARD DXY bias (next 24–48h), key upcoming drivers, invalidation",
+    "gold_outlook": "1–2 sentences: FORWARD Gold bias, key upcoming drivers, invalidation",
+    "sp500_outlook": "1–2 sentences: FORWARD S&P bias, key upcoming drivers, invalidation",
+    "bitcoin_outlook": "1–2 sentences: FORWARD Bitcoin bias, key upcoming drivers, invalidation",
+    "GBPUSD": "1–2 sentences: FORWARD GBPUSD bias, key upcoming drivers, invalidation"
   },
 
   "key_takeaways": [
-    "Most critical insight for trading today #1",
-    "Most critical insight for trading today #2",
-    "Most critical insight for trading today #3"
+    "Forward insight #1 — what to watch or lean into next",
+    "Forward insight #2 — main surprise risk ahead",
+    "Forward insight #3 — what to avoid until clarity"
   ],
 
-  "upcoming_catalysts": "Bullet list of HIGH/MEDIUM impact events next 48h with dates/times. Use \\n for line breaks.",
+  "upcoming_catalysts": "Bullet list of HIGH/MEDIUM impact events next 48–72h with dates/times, forecast vs previous, and expected bias. Use \\n for line breaks.",
 
-  "risk_environment": "2 sentences: current risk environment and any active event risks to be aware of.",
+  "what_to_watch": "2–3 sentences: specific times/events/sessions where the next leg of the move likely resolves.",
+
+  "risk_environment": "2 sentences: forward risk environment and event risks in the next 48h (not a recap of today).",
 
   "nuanced_points": [
-    "First key point for traders",
-    "Second key point for traders",
-    "Third key point for traders"
+    "Non-obvious forward angle traders may miss #1",
+    "Non-obvious forward angle #2",
+    "Non-obvious forward angle #3"
   ]
 }
-
-The drivers outlooks needs to give the overall bot an understanding of where the market will go for these assets and why, in a way where it is able to use these to trade those assets first and foremost, and even better other assets using those explanations.
+The drivers outlooks needs to give the AI an understanding of where the market will go for these assets and why, in a way where it is able to use these to trade those assets first and foremost, and even better other assets using those explanations.
 The key takeaways need to be critical and should tell the whle picture of what is happening today. It should not go over the analysis, but it should inform on what are the top 3 things going on and causing the market to move today
 The same should be for the nuanced points, but they should explain more of the underlying points of the market today and what people may be missing, again not needing to be related to the analysis, but explaining what is driving the markets, even if not obvious.
+Include 2–4 items in event_scenarios for the highest-impact upcoming releases only.
+The drivers outlooks must describe where price is likely HEADED and WHY, so the trading AI can position ahead of moves.
+key_takeaways and nuanced_points must be forward and decision-useful — not headlines already priced in.
 """
 
 
@@ -356,17 +376,24 @@ def synthesize_market_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         print("[market] OPENAI_API_KEY not set — skipping synthesis")
         return {"synthesis_error": "OPENAI_API_KEY not set", "raw_data": raw_data}
 
-    user_prompt = f"""Synthesize this market data into the required JSON intelligence report:
+    user_prompt = f"""Synthesize this market data into a FORWARD-LOOKING JSON intelligence report.
+Trading symbol in focus for bias emphasis: {raw_data.get('symbol', 'GLOBAL')}
 
 TIMESTAMP: {raw_data.get('timestamp')}
 
 === RISK ASSET PRICES ===
+Instructions:
+- Predictive desk brief for the next 24–72h — not a news recap.
+- Use risk asset prices as positioning evidence, not as the story itself.
+- Weight upcoming_catalysts and event_scenarios heavily.
+- If synthesizing drivers_outlook, include the trading symbol pair when relevant.
+=== RISK ASSET PRICES (current positioning snapshot) ===
 {json.dumps(raw_data.get('risk_assets', {}), indent=2)}
 
-=== MACRO & FED POLICY (Perplexity) ===
+=== MACRO & FORWARD POLICY PATH (Perplexity) ===
 {raw_data.get('macro_and_fed', 'Not available')}
 
-=== NEWS, CATALYSTS & RISK ENVIRONMENT (Perplexity) ===
+=== UPCOMING CATALYSTS & SCENARIOS (Perplexity) ===
 {raw_data.get('catalysts_news', 'Not available')}
 
 Output ONLY valid JSON as specified."""

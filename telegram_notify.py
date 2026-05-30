@@ -57,6 +57,12 @@ def format_market_brief_html(data: Dict[str, Any]) -> str:
         )
         parts.append("")
 
+    forward = (data.get("forward_bias_24_48h") or "").strip()
+    if forward:
+        parts.append("<b>Forward bias (24–48h)</b>")
+        parts.append(_e(forward))
+        parts.append("")
+
     summary = (data.get("market_summary") or "").strip()
     if summary:
         parts.append("<b>Summary</b>")

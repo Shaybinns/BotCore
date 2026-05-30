@@ -583,14 +583,14 @@ void ExecuteEnter(
    if(StringLen(assetTraded) == 0)
       assetTraded = TradingSymbol;
    if(riskPercentage <= 0)
-      riskPercentage = 0.01;
+      riskPercentage = 1.0;
    
    Print("Asset: ", assetTraded);
    Print("Order Type: ", orderType);
    Print("Entry Price: ", entryPrice);
    Print("Stop Loss: ", stopLoss);
    Print("Take Profit: ", takeProfit);
-   Print("Risk %: ", riskPercentage * 100, "%");
+   Print("Risk %: ", riskPercentage, "%");
    
    // Validate order details
    if(!ValidateEnterOrder(assetTraded, orderType, entryPrice, stopLoss, takeProfit, riskPercentage))
@@ -758,9 +758,9 @@ bool ValidateEnterOrder(string symbol, string orderType, double entryPrice, doub
       return false;
    }
    
-   if(riskPercentage <= 0 || riskPercentage > 10)  // Max 10% risk
+   if(riskPercentage <= 0 || riskPercentage > 10)
    {
-      Print("❌ Invalid risk percentage: ", riskPercentage, "% (must be 0.1% - 10%)");
+      Print("❌ Invalid risk percentage: ", riskPercentage, " (must be 0.1–10, whole number e.g. 1 = 1%)");
       return false;
    }
    

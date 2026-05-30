@@ -190,6 +190,7 @@ def _user_run_instructions(
         '3. monitoring_timeframes — JSON array of MT5 chart codes for the timeframes you will be analysing at your next review time (e.g. ["M5", "H1"]); only timeframes your strategy requires.',
         "4. executions — execution details (if any) for when you are placing or managing a trade:",
         '   { "action_type": "ENTER" | "MANAGE" | "EXIT" | null, "enter": {...}, "manage": {...}, "exit": {...} }',
+        '   When action_type is ENTER, enter must include risk_percentage (whole number: 1 = 1% risk).',
         "   When action_type is null, omit enter/manage/exit sub-objects.",
         "",
         "Ensure you are following your ACTIVE TRADING STRATEGY (system message). "
@@ -321,7 +322,7 @@ def _build_bot_action_payload(
             "entry_price": _float_or_none(src.get("entry_price")),
             "stop_loss": _float_or_none(src.get("stop_loss")),
             "take_profit": _float_or_none(src.get("take_profit")),
-            "risk_percentage": _float_or_none(src.get("risk_percentage")) or 0.01,
+            "risk_percentage": _float_or_none(src.get("risk_percentage")) or 1.0,
         }
 
     elif action_type == "MANAGE":
@@ -385,6 +386,17 @@ def _apply_execution_validation(bot_action: Dict[str, Any]) -> Dict[str, Any]:
             print("[brain] REJECTED ENTER: invalid entry_price")
             bot_action["action_type"] = None
             bot_action["enter"] = None
+        else:
+            risk = _float_or_none(ent.get("risk_percentage"))
+            if risk is None or risk <= 0:
+                print("[brain] ENTER: risk_percentage missing — defaulting to 1%")
+                ent["risk_percentage"] = 1.0
+                bot_action["enter"] = ent
+                risk = 1.0
+            elif risk > 10:
+                print("[brain] REJECTED ENTER: risk_percentage must be 0.1–10 (whole number, e.g. 1 = 1%)")
+                bot_action["action_type"] = None
+                bot_action["enter"] = None
 
     elif action_type == "MANAGE":
         mg = bot_action.get("manage") or {}
@@ -591,7 +603,9 @@ def _append_run_metadata_intraday(
 def _append_market_context(parts: List[str], market_context: Dict[str, Any]) -> None:
     parts.extend([
         "=== MARKET INTELLIGENCE ===",
-        "Pre-synthesized global brief (regime, risk, drivers, catalysts). Not raw news feeds.",
+        "Forward-looking desk brief (next 24–72h): regime, catalysts, scenarios, asset biases. "
+        "Use for predictive bias and timing — not to recap past news. "
+        "Weight forward_bias_24_48h, upcoming_catalysts, event_scenarios, and what_to_watch.",
         "",
         json.dumps(market_context, indent=2),
         "",
