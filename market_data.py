@@ -330,11 +330,11 @@ Output this exact structure:
   "market_summary": "200–300 word flowing analysis. Lead with the forward path (next sessions, next releases). Then regime, intermarket flows, Fed vs market pricing. End with how a forex trader should lean TODAY given what is still ahead. Use \\n\\n between paragraphs.",
 
   "drivers_outlook": {
-    "dxy_outlook": "1–2 sentences: FORWARD DXY bias (todays session), key upcoming drivers, invalidation",
-    "gold_outlook": "1–2 sentences: FORWARD Gold bias, key upcoming drivers, invalidation",
-    "sp500_outlook": "1–2 sentences: FORWARD S&P bias, key upcoming drivers, invalidation",
-    "bitcoin_outlook": "1–2 sentences: FORWARD Bitcoin bias, key upcoming drivers, invalidation",
-    "GBPUSD": "1–2 sentences: FORWARD GBPUSD bias, key upcoming drivers, invalidation"
+    "dxy_outlook": "1–2 sentences: FORWARD DXY bias (todays session), key upcoming drivers, percentage split; bullish vs bearish, invalidation",
+    "gold_outlook": "1–2 sentences: FORWARD Gold bias, key upcoming drivers, percentage split; bullish vs bearish, invalidation",
+    "sp500_outlook": "1–2 sentences: FORWARD S&P bias, key upcoming drivers, percentage split; bullish vs bearish, invalidation",
+    "bitcoin_outlook": "1–2 sentences: FORWARD Bitcoin bias, key upcoming drivers, percentage split; bullish vs bearish, invalidation",
+    "GBPUSD": "1–2 sentences: FORWARD GBPUSD bias, key upcoming drivers, percentage split; bullish vs bearish, invalidation"
   },
 
   "key_takeaways": [
