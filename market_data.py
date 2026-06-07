@@ -182,7 +182,7 @@ def fetch_catalysts_and_news() -> str:
     prompt = f"""You are a forex catalyst desk preparing FORWARD-LOOKING event intelligence.
 Current time: {current_time} (today is {current_date}).
 
-Prioritize what will MOVE markets in the NEXT 48–72 HOURS — not yesterday's headlines.
+Prioritize what will MOVE markets in the NEXT 24-48 HOURS — not yesterday's headlines.
 
 === PART 1: TODAY'S MARKET-MOVING NEWS ===
 Top 3-5 news items from TODAY ({current_date}) that affect forex markets:
@@ -301,7 +301,7 @@ Key points to consider:
 Analyse with the above framework in mind and always consider the intermarket relationships, upcoming news and general market sentiment and how this will effect the current daily session.
 
 CRITICAL — PREDICTIVE NOT REACTIVE:
-- Lead with what is LIKELY to happen next (24–72h), not what already happened.
+- Lead with what is LIKELY to happen next in todays trading session, not what already happened.
 - Past data and headlines are context only — use them to infer forward positioning and surprise risk.
 - Every outlook field must state direction AHEAD and what would change it.
 - key_takeaways must be actionable FORWARD hooks (what to watch, what to trade toward, what to avoid).
@@ -325,12 +325,12 @@ Output this exact structure:
 
   "risk_profile": "risk-on | risk-off | transitioning",
 
-  "forward_bias_24_48h": "3–5 sentences: base-case direction for risk and USD over the next 24–48h, driven by upcoming catalysts and current positioning. State what confirms or kills this view.",
+  "forward_bias_24h": "3–5 sentences: base-case direction for risk and USD over the next trading session, driven by upcoming catalysts and current positioning. State what confirms or kills this view.",
 
   "market_summary": "200–300 word flowing analysis. Lead with the forward path (next sessions, next releases). Then regime, intermarket flows, Fed vs market pricing. End with how a forex trader should lean TODAY given what is still ahead. Use \\n\\n between paragraphs.",
 
   "drivers_outlook": {
-    "dxy_outlook": "1–2 sentences: FORWARD DXY bias (next 24–48h), key upcoming drivers, invalidation",
+    "dxy_outlook": "1–2 sentences: FORWARD DXY bias (todays session), key upcoming drivers, invalidation",
     "gold_outlook": "1–2 sentences: FORWARD Gold bias, key upcoming drivers, invalidation",
     "sp500_outlook": "1–2 sentences: FORWARD S&P bias, key upcoming drivers, invalidation",
     "bitcoin_outlook": "1–2 sentences: FORWARD Bitcoin bias, key upcoming drivers, invalidation",
@@ -343,11 +343,11 @@ Output this exact structure:
     "Forward insight #3 — what to avoid until clarity"
   ],
 
-  "upcoming_catalysts": "Bullet list of HIGH/MEDIUM impact events next 48–72h with dates/times, forecast vs previous, and expected bias. Use \\n for line breaks.",
+  "upcoming_catalysts": "Bullet list of HIGH/MEDIUM impact events next 24h with dates/times, forecast vs previous, and expected bias. Use \\n for line breaks.",
 
   "what_to_watch": "2–3 sentences: specific times/events/sessions where the next leg of the move likely resolves.",
 
-  "risk_environment": "2 sentences: forward risk environment and event risks in the next 48h (not a recap of today).",
+  "risk_environment": "2 sentences: forward risk environment and event risks in the next 24h (not a recap of today).",
 
   "nuanced_points": [
     "Non-obvious forward angle traders may miss #1",
@@ -361,6 +361,7 @@ The same should be for the nuanced points, but they should explain more of the u
 Include 2–4 items in event_scenarios for the highest-impact upcoming releases only.
 The drivers outlooks must describe where price is likely HEADED and WHY, so the trading AI can position ahead of moves.
 key_takeaways and nuanced_points must be forward and decision-useful — not headlines already priced in.
+You must be explaining what is going to effect the market today, in the market sesssion you are in and is coming up, these are insights to be taken effective immediately.
 """
 
 
