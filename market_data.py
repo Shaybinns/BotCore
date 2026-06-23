@@ -6,7 +6,7 @@ Flow:
        - RapidAPI (Yahoo Finance) — live prices: VIX, DXY, yields, gold, oil, indices
        - Perplexity #1           — macro: CPI, NFP, Fed policy, rate expectations
        - Perplexity #2           — catalysts: economic calendar, news, geopolitics
-  2. Synthesize all raw data into structured forex market intelligence (via GPT-4o-mini)
+  2. Synthesize all raw data into structured forex market intelligence (via gpt-5.4-mini)
   3. Return the synthesis dict — brain.py saves this to DB as market_data_note
 
 The synthesis is done ONCE at SOD (or when cache is stale).
@@ -15,7 +15,7 @@ Every intraday AI call reads the synthesis straight from the DB — no re-fetchi
 APIs used (already in .env):
   RAPIDAPI_KEY       - Yahoo Finance via RapidAPI
   OPENROUTER_API_KEY - Perplexity via OpenRouter
-  OPENAI_API_KEY     - GPT-4o-mini synthesis via OpenAI
+  OPENAI_API_KEY     - gpt-5.4-mini synthesis via OpenAI
 """
 
 import requests
@@ -400,17 +400,18 @@ Instructions:
 Output ONLY valid JSON as specified."""
 
     try:
-        print("[market] Synthesizing market intelligence via GPT-4o-mini...")
+        print("[market] Synthesizing market intelligence via gpt-5.4-mini...")
+        from llm_model import MINI_MODEL
         from openai import OpenAI
         client = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=MINI_MODEL,
             messages=[
                 {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt}
             ],
-            max_tokens=2000,
+            max_completion_tokens=2000,
             temperature=0.2
         )
 

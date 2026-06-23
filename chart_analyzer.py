@@ -19,9 +19,9 @@ import os
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from openai import OpenAI
+from llm_model import DEFAULT_MODEL
 
 load_dotenv()
-
 CHART_IMG_API_KEY = os.getenv("CHART_IMG_API_KEY")
 CHART_IMG_BASE_URL = "https://api.chart-img.com/v1/tradingview/advanced-chart"
 
@@ -340,9 +340,9 @@ def analyze_charts_with_gpt_vision(
     # --- call OpenAI Vision ---
     try:
         response = _get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",
+            model=DEFAULT_MODEL,
             messages=messages,
-            max_tokens=2000,
+            max_completion_tokens=2000,
             temperature=0.2
         )
         raw = response.choices[0].message.content or ""

@@ -8,7 +8,7 @@ OHLC analysis, chart analysis, market data, and AI reasoning.
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 
@@ -16,7 +16,7 @@ from ohlc_analyzer import analyze_ohlc_data
 from chart_analyzer import analyze_charts_with_gpt_vision
 from market_data import get_market_data
 from prompt import compose_sod_prompt, compose_intraday_prompt
-from llm_model import call_gpt
+from llm_model import call_gpt_mini
 from database import (
     get_analysis_record,
     get_market_data_cache,
@@ -186,7 +186,9 @@ def _user_run_instructions(
         "Your analysis will be based on your strategy provided, and you will be outputting your analysis, your next review time, your monitoring timeframes at next review time, and the execution details for any trades you will be placing or managing. As your output will dictate what is traded.",
         "You must output valid JSON per your system prompt, only with exactly four top-level fields:",
         f'1. "{analysis_key}" — {analysis_line}',
-        "2. next_review_time — when you will analyse the market again (London local time, no Z); must match what the strategy needs you to see next.",
+        "2. next_review_time — when you will analyse the market again (London local time, no Z); "
+        "schedule at a strategy catalyst (session open, H1/H4 close, level touch, news) — "
+        "NOT the next M5 candle by default.",
         '3. monitoring_timeframes — JSON array of MT5 chart codes for the timeframes you will be analysing at your next review time (e.g. ["M5", "H1"]); only timeframes your strategy requires.',
         "4. executions — execution details (if any) for when you are placing or managing a trade:",
         '   { "action_type": "ENTER" | "MANAGE" | "EXIT" | null, "enter": {...}, "manage": {...}, "exit": {...} }',
@@ -240,6 +242,34 @@ def _parse_next_review_time(raw: Any) -> Optional[str]:
 
     print(f"[brain] WARNING: could not parse next_review_time: {raw!r}")
     return None
+
+
+def _default_next_review_london() -> str:
+    """Fallback when next_review_time is missing or already passed — next full hour London."""
+    now = datetime.now(_LONDON_TZ)
+    next_h1 = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    if next_h1 <= now:
+        next_h1 += timedelta(hours=1)
+    return next_h1.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _finalize_next_review_time(iso_str: Optional[str]) -> str:
+    """Use the model's time as-is; only substitute next full hour if missing or in the past."""
+    if not iso_str:
+        fallback = _default_next_review_london()
+        print(f"[brain] missing next_review_time — defaulting to {fallback} London")
+        return fallback
+    try:
+        scheduled = datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_LONDON_TZ)
+    except ValueError:
+        fallback = _default_next_review_london()
+        print(f"[brain] unparseable next_review_time ({iso_str!r}) — defaulting to {fallback} London")
+        return fallback
+    if scheduled <= datetime.now(_LONDON_TZ):
+        fallback = _default_next_review_london()
+        print(f"[brain] next_review_time in the past ({iso_str}) — defaulting to {fallback} London")
+        return fallback
+    return iso_str
 
 
 def _parse_monitoring_timeframes(
@@ -297,6 +327,7 @@ def _float_or_none(val: Any) -> Optional[float]:
 def _build_bot_action_payload(
     parsed: Dict[str, Any],
     symbol: str,
+    fill_event: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Map executions block from model JSON to the canonical payload for the EA.
@@ -307,7 +338,9 @@ def _build_bot_action_payload(
         executions = {}
 
     action_type = _normalize_action_type(executions.get("action_type"))
-    next_review_time = _parse_next_review_time(parsed.get("next_review_time"))
+    next_review_time = _finalize_next_review_time(
+        _parse_next_review_time(parsed.get("next_review_time"))
+    )
 
     enter = manage = exit_payload = None
 
@@ -522,6 +555,7 @@ def _normalize_trading_response(
     parsed: Dict[str, Any],
     analysis_key: str,
     symbol: str,
+    fill_event: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Map model JSON (four top-level fields) to analysis text + execution payload for the EA."""
     analysis_text = parsed.get(analysis_key)
@@ -532,7 +566,7 @@ def _normalize_trading_response(
         analysis_text = json.dumps(analysis_text)
     analysis_text = str(analysis_text).strip()
 
-    bot_action = _build_bot_action_payload(parsed, symbol)
+    bot_action = _build_bot_action_payload(parsed, symbol, fill_event=fill_event)
 
     return {
         analysis_key: analysis_text,
@@ -596,6 +630,7 @@ def _append_run_metadata_intraday(
         "=== SYSTEM INFO ===",
         "Intraday check — continue from today's SOD and your prior intraday note if present.",
         "Do not schedule next_review_time at 07:00 London (reserved for automatic SOD).",
+        "Open positions sync on broker fills — you do not need frequent scheduled checks unless the strategy requires it.",
         "",
     ])
 
@@ -913,17 +948,17 @@ def sod_action(
     full_context = "\n".join(context_parts)
 
     # ------------------------------------------------------------------
-    # Step 3: Trading decision — GPT-4o-mini with full assembled context
+    # Step 3: Trading decision — gpt-5.4-mini with full assembled context
     # ------------------------------------------------------------------
-    print("\n[brain] Step 3: Sending to GPT-4o-mini for SOD trading decision...")
+    print("\n[brain] Step 3: Sending to gpt-5.4-mini for SOD trading decision...")
     try:
         sod_prompt    = compose_sod_prompt(strategy_prompt_text)
-        response_text = call_gpt(
+        response_text = call_gpt_mini(
             system_prompt=sod_prompt,
             user_prompt=full_context,
-            model="gpt-4o-mini",
+            temperature=0.2,
         )
-        print(f"[brain] GPT-4o-mini response received ({len(response_text)} chars)")
+        print(f"[brain] gpt-5.4-mini response received ({len(response_text)} chars)")
 
         parsed = _parse_gpt_response(response_text)
         result = _normalize_trading_response(parsed, "sod_analysis", symbol)
@@ -1116,20 +1151,20 @@ def intraday_action(
     full_context = "\n".join(context_parts)
 
     # ------------------------------------------------------------------
-    # Step 3: Trading decision — GPT-4o-mini with full assembled context
+    # Step 3: Trading decision — gpt-5.4-mini with full assembled context
     # ------------------------------------------------------------------
-    print("\n[brain] Step 3: Sending to GPT-4o-mini for intraday trading decision...")
+    print("\n[brain] Step 3: Sending to gpt-5.4-mini for intraday trading decision...")
     try:
         intraday_prompt = compose_intraday_prompt(strategy_prompt_text)
-        response_text = call_gpt(
+        response_text = call_gpt_mini(
             system_prompt=intraday_prompt,
             user_prompt=full_context,
-            model="gpt-4o-mini",
+            temperature=0.2,
         )
-        print(f"[brain] GPT-4o-mini response received ({len(response_text)} chars)")
+        print(f"[brain] gpt-5.4-mini response received ({len(response_text)} chars)")
 
         parsed = _parse_gpt_response(response_text)
-        result = _normalize_trading_response(parsed, "intraday_analysis", symbol)
+        result = _normalize_trading_response(parsed, "intraday_analysis", symbol, fill_event=fill_event)
 
         print("[brain] Saving intraday run JSON to analysis_notes...")
         try:

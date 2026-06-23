@@ -868,6 +868,7 @@ def chat():
         if not openai_key:
             return jsonify({"error": "OPENAI_API_KEY not configured"}), 503
 
+        from llm_model import DEFAULT_MODEL
         from openai import OpenAI
         from prompt import compose_botcore_prompt
 
@@ -877,12 +878,12 @@ def chat():
         client  = OpenAI(api_key=openai_key)
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=DEFAULT_MODEL,
             messages=[
                 {"role": "system", "content": compose_botcore_prompt()},
                 {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
             ],
-            max_tokens=2000,
+            max_completion_tokens=2000,
             temperature=0.4
         )
 
@@ -954,17 +955,18 @@ def chat_stream():
         def generate():
             full_reply = []
             try:
+                from llm_model import DEFAULT_MODEL
                 from openai import OpenAI
                 from prompt import compose_botcore_prompt
 
                 client = OpenAI(api_key=openai_key)
                 stream = client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=DEFAULT_MODEL,
                     messages=[
                         {"role": "system", "content": compose_botcore_prompt()},
                         {"role": "user",   "content": f"{context}\n\n---\n\nUSER: {message}"}
                     ],
-                    max_tokens=2000,
+                    max_completion_tokens=2000,
                     temperature=0.4,
                     stream=True
                 )

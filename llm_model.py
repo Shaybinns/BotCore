@@ -13,36 +13,48 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Default model — chat, commands, classifier, simple tasks
+DEFAULT_MODEL = "gpt-5.4-nano"
+
+# Mini model — synthesis, analysis, trading decisions, deeper reasoning
+MINI_MODEL = "gpt-5.4-mini"
+
 
 def call_gpt(
     system_prompt: str,
     user_prompt: str,
-    model: str = "gpt-4o-mini",
-    max_tokens: int = 2000
+    model: str = DEFAULT_MODEL,
+    max_completion_tokens: int = 6000,
+    temperature: float = 0.7,
 ) -> str:
-    """
-    Call GPT with system and user prompts.
-
-    Used by brain.py for the final trading decision call, which receives the
-    full context: OHLC analysis + visual chart observations + market data +
-    current positions + prior analysis notes.
-
-    Args:
-        system_prompt: System instructions (SOD or Intraday prompt)
-        user_prompt:   Full trading context assembled by brain.py
-        model:         OpenAI model to use (default gpt-4o-mini)
-        max_tokens:    Max response tokens (default 2000 — JSON decision only)
-
-    Returns:
-        Raw GPT response text (JSON string expected — parsed by brain.py)
-    """
+    """Standard call — gpt-5.4-nano. For chat, commands, and simple tasks."""
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt}
+            {"role": "user", "content": user_prompt},
         ],
-        max_tokens=max_tokens,
-        temperature=0.2
+        max_completion_tokens=max_completion_tokens,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content
+
+
+def call_gpt_mini(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = MINI_MODEL,
+    max_completion_tokens: int = 6000,
+    temperature: float = 0.7,
+) -> str:
+    """Mini call — gpt-5.4-mini. For synthesis, portfolio analysis, and trading decisions."""
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_completion_tokens=max_completion_tokens,
+        temperature=temperature,
     )
     return response.choices[0].message.content
