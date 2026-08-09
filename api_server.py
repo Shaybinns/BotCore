@@ -119,6 +119,20 @@ def _cron_secret_ok() -> bool:
     return got == expected
 
 
+@app.route("/api/admin/wipe-operational-data", methods=["POST", "GET"])
+def wipe_operational_data_endpoint():
+    """
+    TEMPORARY — empty operational tables (schemas kept). Delete this route after use.
+    No auth. Call once then remove from code.
+    """
+    try:
+        from clean_db import wipe_operational_data
+        result = wipe_operational_data()
+        return jsonify({"success": True, **result}), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/cron/morning-market-brief", methods=["POST"])
 def cron_morning_market_brief():
     """
