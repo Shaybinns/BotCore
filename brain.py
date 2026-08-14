@@ -746,8 +746,8 @@ def _append_positions_context(
 def _append_ohlc_context(parts: List[str], processed_ohlc: Dict[str, Any]) -> None:
     parts.extend([
         "=== OHLC DATA ANALYSIS ===",
-        "Structured swings, imbalances, FVGs, and levels from raw candles. "
-        "Each timeframe includes last_3_candles (newest-first: open/high/low/close) for exact bar math.",
+        "Structured swings (each with forming-candle time + OHLC for BOS/OB math), "
+        "imbalances, FVGs, levels, and last_3_candles (newest-first).",
         "",
         json.dumps(processed_ohlc, indent=2),
         "",

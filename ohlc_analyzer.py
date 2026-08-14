@@ -3,10 +3,11 @@ OHLC Analyzer
 
 Converts raw candle arrays into structured technical analysis for GPT-4o.
 
-- Swing points (highs/lows)
+- Swing points (highs/lows) with forming-candle time + OHLC for BOS / order-block math
 - Imbalances (detect_imb): 3-candle gaps
 - FVGs (detect_fvg): imbalance after swing level is broken and price crosses back; one of the 3 candles must touch the level
 - Session highs/lows (H1 only): 01:00–07:00, 08:00–12:00, 13:00–17:00 London time
+- last_3_candles: newest-first open/high/low/close (+ time) per timeframe
 
 Candle arrays arrive newest-first (index 0 = most recent bar).
 Each candle: {"time": int, "open": float, "high": float, "low": float, "close": float, "volume": int}
@@ -52,20 +53,37 @@ def _swing_points(candles: List[Dict], strength: int = 3) -> Tuple[List[Dict], L
     Detect swing highs and swing lows.
     strength = number of bars each side that must be lower/higher.
     Candles newest-first; we work on reversed list and translate indices back.
-    Returns (swing_highs, swing_lows) each as list of {"price": float, "bar_index": int}
-    Sorted newest-first (smallest index first).
+    Returns (swing_highs, swing_lows) each as:
+      {price, bar_index, time, open, high, low, close}
+    — time + OHLC are from the candle that printed the swing extreme.
+    Sorted newest-first (smallest bar_index first).
     """
     rev = list(reversed(candles))
     n = len(rev)
     highs, lows = [], []
 
+    def _swing_payload(rev_i: int, price: float) -> Dict[str, Any]:
+        c = rev[rev_i]
+        bar_index = n - 1 - rev_i
+        out: Dict[str, Any] = {
+            "price": round(price, 5),
+            "bar_index": bar_index,
+            "open": round(c["open"], 5),
+            "high": round(c["high"], 5),
+            "low": round(c["low"], 5),
+            "close": round(c["close"], 5),
+        }
+        if c.get("time") is not None:
+            out["time"] = c["time"]
+        return out
+
     for i in range(strength, n - strength):
         h = rev[i]["high"]
         l = rev[i]["low"]
         if all(rev[i]["high"] >= rev[j]["high"] for j in range(i - strength, i + strength + 1) if j != i):
-            highs.append({"price": round(h, 5), "bar_index": (n - 1 - i)})
+            highs.append(_swing_payload(i, h))
         if all(rev[i]["low"] <= rev[j]["low"] for j in range(i - strength, i + strength + 1) if j != i):
-            lows.append({"price": round(l, 5), "bar_index": (n - 1 - i)})
+            lows.append(_swing_payload(i, l))
 
     highs.sort(key=lambda x: x["bar_index"])
     lows.sort(key=lambda x: x["bar_index"])
