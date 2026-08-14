@@ -294,6 +294,17 @@ def _analyze_timeframe(tf: str, candles: List[Dict]) -> Dict[str, Any]:
         "period_low": round(period_low, 5),
         "nearest_resistance": nearest_resistance,
         "nearest_support": nearest_support,
+        # Newest-first: index 0 = most recent (forming/last closed depending on EA), then prior 2.
+        "last_3_candles": [
+            {
+                "open": round(c["open"], 5),
+                "high": round(c["high"], 5),
+                "low": round(c["low"], 5),
+                "close": round(c["close"], 5),
+                **({"time": c["time"]} if c.get("time") is not None else {}),
+            }
+            for c in candles[:3]
+        ],
         "swing_highs": swing_h[:10],
         "swing_lows": swing_l[:10],
         "detect_imb": imb,
