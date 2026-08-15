@@ -4,8 +4,8 @@ OHLC Analyzer
 Converts raw candle arrays into structured technical analysis for GPT-4o.
 
 - Swing points (highs/lows) with forming-candle time + OHLC for BOS / order-block math
-- Imbalances (detect_imb): 3-candle gaps
-- FVGs (detect_fvg): imbalance after swing level is broken and price crosses back; one of the 3 candles must touch the level
+- Imbalances (detect_imb): 3-candle gaps (all timeframes)
+- FVGs (detect_fvg): ICT 3-candle gap on M1/M2/M5 only — entry midpoint of the gap
 - Session highs/lows (H1 only): 01:00–07:00, 08:00–12:00, 13:00–17:00 London time
 - last_3_candles: newest-first open/high/low/close (+ time) per timeframe
 
@@ -32,6 +32,7 @@ _TF_RANK = {
     "1h_DATA": 4, "H1_DATA": 4,
     "M15_DATA": 3,
     "M5_DATA":  2,
+    "M2_DATA":  1,
     "M1_DATA":  1,
 }
 
@@ -42,6 +43,24 @@ def _tf_rank(key: str) -> int:
 
 def _is_h1_key(tf: str) -> bool:
     return tf.upper() in ("1H_DATA", "H1_DATA")
+
+
+def _is_fvg_timeframe(tf: str) -> bool:
+    """FVG detection is entry-TF only (M1 / M2 / M5)."""
+    key = tf.upper().replace("_DATA", "")
+    return key in ("M1", "1M", "M2", "2M", "M5", "5M")
+
+
+def _candle_ohlc(c: Dict) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "open": round(c["open"], 5),
+        "high": round(c["high"], 5),
+        "low": round(c["low"], 5),
+        "close": round(c["close"], 5),
+    }
+    if c.get("time") is not None:
+        out["time"] = c["time"]
+    return out
 
 
 # =============================================================================
@@ -123,95 +142,50 @@ def _detect_imb(candles: List[Dict], max_imb: int = 10) -> List[Dict]:
 
 
 # =============================================================================
-# FVG (imbalance after swing break + cross back; one of 3 candles must touch level)
+# FVG (ICT 3-candle gap — M1/M2/M5 only)
+# Candle 1 = oldest of the three, candle 3 = newest (closed).
+# Bullish: candle 3 low > candle 1 high; range = [c1 high, c3 low]; entry = midpoint.
+# Bearish: candle 3 high < candle 1 low; range = [c3 high, c1 low]; entry = midpoint.
 # =============================================================================
 
-def _detect_fvg(
-    candles: List[Dict],
-    swing_highs: List[Dict],
-    swing_lows: List[Dict],
-    max_fvgs: int = 5,
-) -> List[Dict]:
+def _detect_fvg(candles: List[Dict], max_fvgs: int = 10) -> List[Dict]:
     """
-    FVG: imbalance that forms when price crosses back through a swing level after breaking it.
-    - Upward FVG (buys): swing low → price breaks below → crosses back up; one of the 3 candles
-      that create the upward imbalance must touch the swing low; gap = FVG range for longs.
-    - Downward FVG (sells): swing high → price breaks above (raid) → crosses back down; one of
-      the 3 candles must touch the swing high; gap = FVG range for shorts.
-    Candles newest-first. Returns newest first.
+    3-candle FVG. Candles newest-first:
+      c3 = newest, c2 = middle, c1 = oldest of the three.
+    Returns newest first.
     """
     fvgs = []
-    n = len(candles)
-
-    def _touches(c0: Dict, c1: Dict, c2: Dict, level: float) -> bool:
-        for c in (c0, c1, c2):
-            if c["low"] <= level <= c["high"]:
-                return True
-        return False
-
-    def _broke_below(level: float, start: int) -> bool:
-        for j in range(start, n):
-            if candles[j]["low"] < level:
-                return True
-        return False
-
-    def _broke_above(level: float, start: int) -> bool:
-        for j in range(start, n):
-            if candles[j]["high"] > level:
-                return True
-        return False
-
-    # Upward FVG: bullish gap after break below swing low; one of 3 candles touches level
-    for i in range(n - 2):
-        c0, c1, c2 = candles[i], candles[i + 1], candles[i + 2]
-        if c0["low"] <= c2["high"]:
-            continue
-        top, bottom = round(c0["low"], 5), round(c2["high"], 5)
-        for sl in swing_lows:
-            level = sl["price"]
-            if level > bottom:
-                continue
-            if sl["bar_index"] < i + 2:
-                continue
-            if not _touches(c0, c1, c2, level):
-                continue
-            if not _broke_below(level, i + 2):
-                continue
+    for i in range(len(candles) - 2):
+        c3, c2, c1 = candles[i], candles[i + 1], candles[i + 2]
+        if c3["low"] > c1["high"]:
+            top = round(c3["low"], 5)
+            bottom = round(c1["high"], 5)
             fvgs.append({
                 "type": "BULLISH",
                 "top": top,
                 "bottom": bottom,
-                "swing_level": level,
+                "midpoint": round((top + bottom) / 2, 5),
                 "bar_index": i,
+                "candle_1": _candle_ohlc(c1),
+                "candle_2": _candle_ohlc(c2),
+                "candle_3": _candle_ohlc(c3),
             })
-            break
-
-    # Downward FVG: bearish gap after break above swing high; one of 3 candles touches level
-    for i in range(n - 2):
-        c0, c1, c2 = candles[i], candles[i + 1], candles[i + 2]
-        if c0["high"] >= c2["low"]:
-            continue
-        top, bottom = round(c2["low"], 5), round(c0["high"], 5)
-        for sh in swing_highs:
-            level = sh["price"]
-            if level < top:
-                continue
-            if sh["bar_index"] < i + 2:
-                continue
-            if not _touches(c0, c1, c2, level):
-                continue
-            if not _broke_above(level, i + 2):
-                continue
+        elif c3["high"] < c1["low"]:
+            top = round(c1["low"], 5)
+            bottom = round(c3["high"], 5)
             fvgs.append({
                 "type": "BEARISH",
                 "top": top,
                 "bottom": bottom,
-                "swing_level": level,
+                "midpoint": round((top + bottom) / 2, 5),
                 "bar_index": i,
+                "candle_1": _candle_ohlc(c1),
+                "candle_2": _candle_ohlc(c2),
+                "candle_3": _candle_ohlc(c3),
             })
+        if len(fvgs) >= max_fvgs:
             break
-
-    return fvgs[:max_fvgs]
+    return fvgs
 
 
 # =============================================================================
@@ -294,7 +268,7 @@ def _analyze_timeframe(tf: str, candles: List[Dict]) -> Dict[str, Any]:
 
     swing_h, swing_l = _swing_points(candles, strength=3)
     imb = _detect_imb(candles, max_imb=10)
-    fvgs = _detect_fvg(candles, swing_h, swing_l, max_fvgs=5)
+    fvgs = _detect_fvg(candles) if _is_fvg_timeframe(tf) else []
 
     nearest_resistance = next(
         (sh["price"] for sh in sorted(swing_h, key=lambda x: x["price"]) if sh["price"] > current_price),
