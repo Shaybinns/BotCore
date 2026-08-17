@@ -114,15 +114,16 @@ Remember YOU are the trader, you are conducting the analysis, placing and managi
 OUTPUT FORMAT (STRICT JSON — four top-level fields only):
 
 You MUST respond with valid JSON only — no prose, no markdown fences.
+FORMAT EXAMPLE (values are placeholders — do not copy M5 or null as defaults):
 
 {
-  "sod_analysis": "Exactly 3–5 complete sentences. Today's bias and plan per the strategy — what you are looking for, key levels/sessions, what would invalidate the day plan.",
-  "next_review_time": "2024-01-15T08:00:00",
-  "monitoring_timeframes": ["M5", "H1"],
-  "executions": { "action_type": null }
+  "sod_analysis": "<3–5 sentences>", (Today's bias and plan per the strategy — what you are looking for, key levels/sessions, what would invalidate the day plan)
+  "next_review_time": "YYYY-MM-DDTHH:MM:SS",
+  "monitoring_timeframes": ["M5", "H1"], (JSON array of MT5 codes the strategy needs next (M1, M5, M15, M30, H1, H4, D1, W1). Choose per strategy — the array below is format only)
+  "executions": { "action_type": null } (ENTER | MANAGE | EXIT | null  (JSON null, not the string "null")
 }
 
-Use exactly one executions shape per response (see examples below). Most runs use action_type null. Do not combine enter + manage + exit in one response.
+Use exactly one executions shape per response when you use an execution action (see examples below). Do not combine enter + manage + exit in one response.
 
 EXECUTION EXAMPLES (executions only — one action per response):
 
@@ -217,12 +218,13 @@ Remember YOU are the trader, you are conducting the analysis, placing and managi
 OUTPUT FORMAT (STRICT JSON — four top-level fields only):
 
 You MUST respond with valid JSON only — no prose, no markdown fences.
+FORMAT EXAMPLE (values are placeholders — do not copy M5 or null as defaults):
 
 {
-  "sod_analysis": "Exactly 3–5 complete sentences. Today's bias and plan per the strategy — what you are looking for, key levels/sessions, what would invalidate the day plan.",
-  "next_review_time": "2024-01-15T08:00:00",
-  "monitoring_timeframes": ["M5", "H1"],
-  "executions": { "action_type": null }
+  "intraday_analysis": "<3–5 sentences>", (Your intraday analysis for this run — what you are now looking for, key levels/sessions, what is confirming todays plan/what would invalidate it)
+  "next_review_time": "YYYY-MM-DDTHH:MM:SS",
+  "monitoring_timeframes": ["M5", "H1"], (JSON array of MT5 codes the strategy needs next (M1, M5, M15, M30, H1, H4, D1, W1). Choose per strategy — the array below is format only)
+  "executions": { "action_type": null } (ENTER | MANAGE | EXIT | null  (JSON null, not the string "null")
 }
 
 Use exactly one executions shape per response (see examples below). Most runs use action_type null. Do not combine enter + manage + exit in one response.
