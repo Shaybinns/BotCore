@@ -214,13 +214,14 @@ def _session_highs_lows(candles: List[Dict]) -> List[Dict]:
 
     now_london = datetime.now(_LONDON_TZ)
     current_hour = now_london.hour
+    today = now_london.date()
     results = []
 
     for label, start_h, end_h in _SESSIONS:
         entry = {"session": label, "high": None, "low": None}
         in_progress = start_h <= current_hour < end_h
 
-        # Collect candles that fall in this London-time session window.
+        # Collect TODAY's candles that fall in this London-time session window.
         # fromtimestamp with utc reads the London-local epoch as a clock value.
         session_candles = []
         for c in candles:
@@ -230,6 +231,8 @@ def _session_highs_lows(candles: List[Dict]) -> List[Dict]:
             try:
                 dt = datetime.fromtimestamp(t, tz=timezone.utc)
             except (TypeError, OSError):
+                continue
+            if dt.date() != today:
                 continue
             h = dt.hour
             if h >= start_h and h < end_h:
@@ -360,8 +363,8 @@ def analyze_ohlc_data(ohlc_data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, A
 
     result["summary"] = {
         "current_price": round(current_price, 5),
-        "key_resistance_levels": _dedup(all_swing_h),
-        "key_support_levels": _dedup(all_swing_l),
+        "key_resistance_levels": [l for l in _dedup(all_swing_h) if l > current_price],
+        "key_support_levels": [l for l in _dedup(all_swing_l) if l < current_price],
         "highest_tf_analyzed": sorted_tfs[0],
         "lowest_tf_analyzed": lowest_tf,
     }
